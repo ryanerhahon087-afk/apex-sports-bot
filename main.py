@@ -235,8 +235,17 @@ def generate_now():
 
     try:
         async def _run():
-            if not kalshi._session:
-                await kalshi.connect()
+            # Always close + recreate the aiohttp session in this event loop.
+            # kalshi._session was created in the background thread's loop and
+            # cannot be reused here — aiohttp raises "Timeout context manager
+            # should be used inside a task" if you try.
+            if kalshi._session:
+                try:
+                    await kalshi._session.close()
+                except Exception:
+                    pass
+                kalshi._session = None
+            await kalshi.connect()
             result = await generator.generate_all_slips()
             return result
 
@@ -259,8 +268,14 @@ def probe_markets():
 
     async def _run():
         import aiohttp, time
-        if not kalshi._session:
-            await kalshi.connect()
+        # Recreate session in this event loop (see generate_now comment)
+        if kalshi._session:
+            try:
+                await kalshi._session.close()
+            except Exception:
+                pass
+            kalshi._session = None
+        await kalshi.connect()
 
         out = {}
 
