@@ -300,6 +300,7 @@ class SlipGenerator:
         logger.info(f"[GEN] Daily: {len(eligible)} eligible candidates")
 
         # FIX 2: Use yes_ask directly for individual_odds; skip zero-odds candidates
+        # Also include game_start so assemble_slip can pass it through to legs
         daily_candidates = []
         for c in eligible:
             individual_odds = self._calc_odds(c["yes_ask"])
@@ -317,6 +318,7 @@ class SlipGenerator:
                 "individual_odds": individual_odds,
                 "confidence": c["eval_daily"]["confidence"],
                 "ai_reasoning": c["eval_daily"].get("reasoning", ""),
+                "game_start": c.get("game_start", ""),
             })
 
         if not daily_candidates:
@@ -349,8 +351,10 @@ class SlipGenerator:
                 return None
 
         # FIX 4: Enrich AI-returned selected_legs with game_start from candidates
+        # The AI copies back the legs but may omit game_start — patch it in
         ticker_to_game_start = {
-            c["kalshi_ticker"]: c.get("game_start", "") for c in eligible
+            c["kalshi_ticker"]: c.get("game_start", "")
+            for c in daily_candidates
         }
         for leg in slip_data.get("selected_legs", []):
             if not leg.get("game_start"):
@@ -359,9 +363,31 @@ class SlipGenerator:
                 )
 
         projected_finish = max(
-            (l.get("game_start", "") for l in slip_data["selected_legs"]),
+            (l.get("game_start", "") for l in slip_data["selected_legs"]
+             if l.get("game_start")),
             default=""
         )
+
+        # Fallback: if AI returned combined_odds=0, calculate it from legs
+        combined_odds = float(slip_data.get("combined_odds") or 0)
+        if combined_odds <= 0:
+            combined_odds = 1.0
+            for leg in slip_data["selected_legs"]:
+                leg_odds = float(leg.get("individual_odds") or 0)
+                if leg_odds > 0:
+                    combined_odds *= leg_odds
+            combined_odds = round(combined_odds, 4)
+            logger.info(f"[GEN] Recalculated combined_odds={combined_odds} "
+                        f"(AI returned 0)")
+
+        # Fallback: if AI returned overall_confidence=0, average the legs
+        overall_conf = float(slip_data.get("overall_confidence") or 0)
+        if overall_conf <= 0:
+            confs = [float(l.get("confidence") or 0)
+                     for l in slip_data["selected_legs"]]
+            overall_conf = round(sum(confs) / len(confs), 2) if confs else 0
+            logger.info(f"[GEN] Recalculated overall_conf={overall_conf} "
+                        f"(AI returned 0)")
 
         # Calculate stake
         stake = min(
@@ -369,14 +395,22 @@ class SlipGenerator:
             self._config.DAILY_HARD_CAP
         )
         stake = round(stake, 2)
-        combined_odds = slip_data["combined_odds"]
         potential_payout = round(stake * combined_odds, 2)
 
+        # --- DEBUG: log everything before saving ---
         logger.info(
-            f"[GEN] Saving daily slip | legs={len(slip_data['selected_legs'])} | "
-            f"odds={combined_odds:.2f}x | conf={slip_data.get('overall_confidence', 0):.1f} | "
-            f"stake=${stake:.2f} | finish={projected_finish}"
+            f"[SAVE-DEBUG] combined_odds={combined_odds} "
+            f"confidence={overall_conf} "
+            f"legs={len(slip_data['selected_legs'])} "
+            f"projected_finish={projected_finish}"
         )
+        for leg in slip_data["selected_legs"]:
+            logger.info(
+                f"[LEG-DEBUG] odds={leg.get('individual_odds')} "
+                f"conf={leg.get('confidence')} "
+                f"game_start={leg.get('game_start')} "
+                f"ticker={leg.get('kalshi_ticker')}"
+            )
 
         # Save to database
         slip_id = self._db.save_slip(
@@ -388,7 +422,7 @@ class SlipGenerator:
                 "combined_odds": combined_odds,
                 "stake": stake,
                 "potential_payout": potential_payout,
-                "confidence": slip_data["overall_confidence"],
+                "confidence": overall_conf,
                 "projected_finish": projected_finish,
             },
             legs=slip_data["selected_legs"],
@@ -399,6 +433,7 @@ class SlipGenerator:
             "combined_odds": combined_odds,
             "stake": stake,
             "potential_payout": potential_payout,
+            "confidence": overall_conf,
             "legs": slip_data["selected_legs"],
         }
 

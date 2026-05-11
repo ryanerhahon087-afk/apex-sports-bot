@@ -243,10 +243,11 @@ ASSEMBLY RULES:
    Eliminate the least probable/most speculative when choosing
 
 4. ODDS CALIBRATION:
-   - Individual odds = 1 / (win_probability / 100)
-   - Combined odds = multiply all individual odds
+   - Each candidate already has its "individual_odds" field pre-calculated — use it as-is
+   - combined_odds = multiply all selected legs' individual_odds together
    - If combined odds exceed maximum, remove the least confident leg
    - If combined odds are below minimum, add more legs
+   - IMPORTANT: You must always return combined_odds as the actual product of the legs, never 0
 
 5. FOR LOTTO SLIP: Target {target_odds}x-455x combined odds.
    More legs, more speculative picks allowed.
@@ -289,9 +290,19 @@ Return ONLY the JSON."""
                 text = re.sub(r"```json?\n?", "", text).rstrip("`").strip()
 
             slip = json.loads(text)
-            logger.info(f"[INTEL] Slip assembled: {len(slip.get('selected_legs',[]))} legs | "
-                       f"odds={slip.get('combined_odds')} | "
-                       f"conf={slip.get('overall_confidence')}")
+            legs = slip.get("selected_legs", [])
+            logger.info(
+                f"[ASSEMBLE] combined_odds={slip.get('combined_odds')} "
+                f"overall_confidence={slip.get('overall_confidence')} "
+                f"legs={len(legs)}"
+            )
+            # Log each leg's individual_odds so we can verify
+            for leg in legs:
+                logger.info(
+                    f"[ASSEMBLE-LEG] ticker={leg.get('kalshi_ticker')} "
+                    f"individual_odds={leg.get('individual_odds')} "
+                    f"conf={leg.get('confidence')}"
+                )
             return slip
 
         except Exception as e:
