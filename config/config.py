@@ -92,7 +92,7 @@ CB_WIN_RATE_THRESHOLD   = 0.40      # Below 40% overall win rate = pause
 CB_HALT_HOURS           = 24        # Pause 24 hours when triggered
 
 # ── AI MODEL ──────────────────────────────────────────────────────────────────
-AI_MODEL                = "claude-sonnet-4-20250514"  # Sonnet for sports reasoning
+AI_MODEL                = "claude-sonnet-4-5"  # Sonnet for sports reasoning
 AI_MAX_TOKENS           = 2000
 
 # ── DASHBOARD ─────────────────────────────────────────────────────────────────
