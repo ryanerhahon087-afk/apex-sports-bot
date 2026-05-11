@@ -258,53 +258,58 @@ def probe_markets():
         return jsonify({"error": "Bot not initialized"}), 503
 
     async def _run():
+        import aiohttp, time
         if not kalshi._session:
             await kalshi.connect()
 
         out = {}
 
-        # 0. Raw /series response — see what keys come back
-        raw_series = await kalshi._get('/series', {'limit': 100})
-        out["series_raw_keys"] = list(raw_series.keys())
-        out["series_raw_count"] = {k: len(v) if isinstance(v, list) else v
-                                   for k, v in raw_series.items()}
+        # Helper: raw request that returns (status, body_text, parsed_json_or_none)
+        async def raw_get(path, params=None):
+            url = kalshi._base_url + path
+            headers = kalshi._auth_headers("GET", path)
+            try:
+                async with kalshi._session.get(url, params=params, headers=headers) as r:
+                    text = await r.text()
+                    try:
+                        parsed = json.loads(text)
+                    except Exception:
+                        parsed = None
+                    return r.status, text[:500], parsed
+            except Exception as e:
+                return 0, str(e), None
 
-        # Try every possible list key
-        series_list = (raw_series.get('series') or
-                       raw_series.get('data') or
-                       raw_series.get('items') or
-                       raw_series.get('results') or [])
-        out["series_list_length"] = len(series_list)
-        if series_list:
-            out["series_first_item_keys"] = list(series_list[0].keys()) if series_list else []
+        # 0. Auth check — hit /portfolio/balance (always works if auth is valid)
+        status, body, parsed = await raw_get('/portfolio/balance')
+        out["auth_check"] = {"status": status, "body": body[:200]}
 
-        sports_keywords = ['NBA', 'MLB', 'NFL', 'NHL', 'SOCCER', 'MLS']
-        sports_series = [
-            {"ticker": s.get("ticker", s.get("series_ticker", "")),
-             "title": s.get("title", "")}
-            for s in series_list
-            if any(k in (s.get('ticker', '') + s.get('series_ticker', '')).upper()
-                   for k in sports_keywords)
-        ]
-        out["all_sports_series"] = sports_series
+        # 1. Raw /series call with status code
+        status, body, parsed = await raw_get('/series', {'limit': 100})
+        out["series_endpoint"] = {
+            "status": status,
+            "body_preview": body[:300],
+            "keys": list(parsed.keys()) if parsed else [],
+        }
+        series_list = (parsed or {}).get('series', [])
+        out["series_count"] = len(series_list)
 
-        # 1. Directly probe all known sports series tickers
+        # 2. Raw /markets for each known series with status code
         known_series = [
             "KXNBAGAME", "KXNBATOTAL", "KXMLBGAME", "KXMLBTOTAL",
-            "KXNFLGAME", "KXNHLTOTAL", "KXNHLGAME", "KXMLSSOCCER",
-            "KXNCAA", "KXSOCCER", "KXMLS",
+            "KXNFLGAME", "KXNHLTOTAL", "KXNHLGAME", "KXSOCCER", "KXMLS",
         ]
         samples = {}
         for series in known_series:
-            mdata = await kalshi._get('/markets', {
+            status, body, parsed = await raw_get('/markets', {
                 'series_ticker': series,
                 'status': 'open',
                 'limit': 3,
             })
-            markets = mdata.get('markets', [])
+            markets = (parsed or {}).get('markets', [])
             if markets:
                 m = markets[0]
                 samples[series] = {
+                    "http_status": status,
                     "count": len(markets),
                     "sample_title": m.get("title", ""),
                     "sample_ticker": m.get("ticker", ""),
@@ -314,37 +319,29 @@ def probe_markets():
                     "event_ticker": m.get("event_ticker", ""),
                 }
             else:
-                samples[series] = {"count": 0}
+                samples[series] = {"http_status": status, "count": 0,
+                                   "body_preview": body[:150]}
         out["known_series_probe"] = samples
 
-        # 2. Also try /events endpoint to find sports events directly
-        events_data = await kalshi._get('/events', {
+        # 3. /markets without series filter — what's open right now?
+        status, body, parsed = await raw_get('/markets', {
             'status': 'open',
-            'limit': 20,
+            'limit': 5,
         })
-        events = events_data.get('events', [])
-        sports_events = [
-            {
-                "ticker": e.get("event_ticker", ""),
-                "title": e.get("title", ""),
-                "series_ticker": e.get("series_ticker", ""),
-            }
-            for e in events
-            if any(k in (e.get('event_ticker', '') + e.get('series_ticker', '') +
-                         e.get('title', '')).upper()
-                   for k in sports_keywords)
-        ]
-        out["sports_events_sample"] = sports_events[:10]
-        out["total_open_events"] = len(events)
+        markets = (parsed or {}).get('markets', [])
+        out["open_markets_sample"] = {
+            "http_status": status,
+            "count": len(markets),
+            "titles": [m.get("title", "") for m in markets],
+            "tickers": [m.get("ticker", "") for m in markets],
+        }
 
-        # 3. Full structure of first available market across known series
+        # 4. Full first available market structure
         for series in ["KXNBAGAME", "KXMLBGAME", "KXNBATOTAL", "KXMLBTOTAL"]:
-            mdata = await kalshi._get('/markets', {
-                'series_ticker': series,
-                'status': 'open',
-                'limit': 1,
+            status, body, parsed = await raw_get('/markets', {
+                'series_ticker': series, 'status': 'open', 'limit': 1,
             })
-            markets = mdata.get('markets', [])
+            markets = (parsed or {}).get('markets', [])
             if markets:
                 out["full_market_example"] = {"series": series, "market": markets[0]}
                 break
