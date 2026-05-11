@@ -22,7 +22,9 @@ ACTIVE_SERIES = [
     "KXNBAGAME",    # NBA game winners
     "KXNBATOTAL",   # NBA totals (over/under points)
     "KXMLBGAME",    # MLB game winners
-    "KXMLBTOTAL",   # MLB total runs (when available)
+    "KXMLBTOTAL",   # MLB total runs
+    "KXNHLGAME",    # NHL game winners
+    "KXNHLTOTAL",   # NHL total goals
 ]
 
 # Series to add when available on Kalshi:
@@ -32,7 +34,7 @@ ACTIVE_SERIES = [
 
 # ── SPORT PRIORITY ORDER ──────────────────────────────────────────────────────
 # Bot prioritizes sports in this order when building slips
-SPORT_PRIORITY = ["NBA", "MLB", "SOCCER"]
+SPORT_PRIORITY = ["NBA", "MLB", "NHL", "SOCCER"]
 
 # ── SLIP CONFIGURATION ────────────────────────────────────────────────────────
 
@@ -81,8 +83,8 @@ CALIBRATION_BUFFER = {
 
 # ── TIMING ────────────────────────────────────────────────────────────────────
 # Slip generation window (local time, Eastern US)
-GENERATION_HOUR_START   = 10        # 10 AM Eastern
-GENERATION_HOUR_END     = 12        # 12 PM Eastern
+GENERATION_HOUR_START   = 8         # 8 AM Eastern
+GENERATION_HOUR_END     = 23        # 11 PM Eastern
 # Games must start at least this many hours after generation
 MIN_HOURS_BEFORE_GAME   = 2
 

@@ -98,11 +98,12 @@ class SlipGenerator:
     def _group_markets_by_game(self, all_markets: dict) -> list:
         """
         Group markets by game event and filter for upcoming games.
-        Returns list of game dicts with their available markets.
+        Uses occurrence_datetime (real game tip-off/puck-drop) as game_start;
+        falls back to close_time when occurrence_datetime is absent.
+        Only requires the game hasn't started yet — no fixed-hour buffer.
         """
         games_dict = {}
         now = datetime.now(timezone.utc)
-        min_start = now + timedelta(hours=self._config.MIN_HOURS_BEFORE_GAME)
 
         for series, markets in all_markets.items():
             sport = self._series_to_sport(series)
@@ -112,23 +113,26 @@ class SlipGenerator:
                 if not event_ticker:
                     continue
 
-                # Parse game close time
-                close_time_str = market.get("close_time", "")
-                if not close_time_str:
+                # Use occurrence_datetime (actual game start) when available,
+                # fall back to close_time (contract expiry) otherwise.
+                game_start_str = (
+                    market.get("occurrence_datetime") or
+                    market.get("close_time", "")
+                )
+                if not game_start_str:
                     continue
 
                 try:
-                    close_time = datetime.fromisoformat(
-                        close_time_str.replace("Z", "+00:00")
+                    game_start = datetime.fromisoformat(
+                        game_start_str.replace("Z", "+00:00")
                     )
                 except Exception:
                     continue
 
-                # Only games that haven't started yet
-                if close_time <= min_start:
+                # Only include games that haven't started yet
+                if game_start <= now:
                     continue
 
-                # Skip markets with no real liquidity data
                 yes_ask = float(market.get("yes_ask_dollars") or 0)
                 yes_bid = float(market.get("yes_bid_dollars") or 0)
 
@@ -137,7 +141,8 @@ class SlipGenerator:
                         "event_ticker": event_ticker,
                         "title": market.get("title", ""),
                         "sport": sport,
-                        "close_time": close_time_str,
+                        "game_start": game_start_str,   # real tip-off time
+                        "close_time": market.get("close_time", ""),
                         "markets": [],
                     }
 
@@ -166,6 +171,8 @@ class SlipGenerator:
             return "NHL"
         elif series.startswith("KXMLS") or series.startswith("KXSOCCER"):
             return "SOCCER"
+        elif series.startswith("KXNFL"):
+            return "NFL"
         return "OTHER"
 
     def _infer_market_type(self, series: str, market: dict) -> str:
@@ -229,7 +236,7 @@ class SlipGenerator:
                     "current_odds": self._calc_odds(market["yes_ask"]),
                     "yes_ask": market["yes_ask"],
                     "yes_bid": market["yes_bid"],
-                    "game_start": game.get("close_time"),
+                    "game_start": game.get("game_start") or game.get("close_time"),
                     "research": research,
                 }
 
