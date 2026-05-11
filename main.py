@@ -850,7 +850,17 @@ function renderSlips(filter) {
     }
   }
   
-  const icons = { DAILY:'🏀', ROLLOVER:'🔄', LOTTO:'🎰' };
+  // FIX 3: Sport-based icon instead of slip-type-based
+  function getSlipIcon(slip) {
+    const sports = (slip.sport_mix || '').toUpperCase();
+    if (slip.slip_type === 'ROLLOVER') return '🔄';
+    if (slip.slip_type === 'LOTTO') return '🎰';
+    if (sports.includes('NBA')) return '🏀';
+    if (sports.includes('MLB')) return '⚾';
+    if (sports.includes('SOCCER')) return '⚽';
+    if (sports.includes('NHL')) return '🏒';
+    return '📋';
+  }
   const iconBg = { DAILY:'si-daily', ROLLOVER:'si-rollover', LOTTO:'si-lotto' };
   const typeBadge = { DAILY:'stb-daily', ROLLOVER:'stb-rollover', LOTTO:'stb-lotto' };
   
@@ -876,7 +886,7 @@ function renderSlips(filter) {
     }
     
     return `<tr onclick="openSlipModal(${s.id})">
-      <td><div class="slip-icon ${iconBg[s.slip_type] || 'si-daily'}">${icons[s.slip_type] || '📋'}</div></td>
+      <td><div class="slip-icon ${iconBg[s.slip_type] || 'si-daily'}">${getSlipIcon(s)}</div></td>
       <td>
         <span class="slip-type-badge ${typeBadge[s.slip_type] || 'stb-daily'}">${s.slip_type}</span>
         ${rolloverInfo}

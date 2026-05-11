@@ -134,6 +134,15 @@ class SportsKalshiClient:
                 logger.info(f"[MARKETS] {series}: {len(markets)} markets | "
                            f"sample: {m.get('title','')[:50]} | "
                            f"ask={yes_ask:.2f} bid={yes_bid:.2f}")
+            else:
+                logger.info(f"[MARKETS] {series}: 0 markets")
+
+        # FIX 5: Summary log
+        total = sum(len(v) for v in results.values())
+        logger.info(
+            f"[MARKETS] Series scan complete ({total} total): " +
+            ", ".join(f"{k}:{len(v)}" for k, v in results.items())
+        )
         return results
 
     async def get_market(self, ticker: str) -> dict:

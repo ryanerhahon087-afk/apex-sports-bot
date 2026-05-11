@@ -258,11 +258,32 @@ class SlipGenerator:
     async def _generate_daily_slip(self, candidates: list,
                                     balance: float) -> Optional[dict]:
         """Generate the daily picks slip."""
-        # Filter candidates that pass daily confidence threshold
+        # FIX 1: Lower threshold to 7.0 and log per-sport breakdown
+        DAILY_THRESHOLD = 7.0  # was DAILY_MIN_CONFIDENCE (7.5)
+
+        # Log per-sport breakdown before filtering
+        by_sport: dict = {}
+        for c in candidates:
+            s = c.get("sport", "?")
+            conf = c.get("eval_daily", {}).get("confidence", 0)
+            include = c.get("eval_daily", {}).get("include_in_slip", False)
+            by_sport.setdefault(s, {"total": 0, "conf_pass": 0, "include_pass": 0})
+            by_sport[s]["total"] += 1
+            if conf >= DAILY_THRESHOLD:
+                by_sport[s]["conf_pass"] += 1
+            if conf >= DAILY_THRESHOLD and include:
+                by_sport[s]["include_pass"] += 1
+
+        for sport, counts in by_sport.items():
+            logger.info(
+                f"[GEN] Daily candidates {sport}: "
+                f"{counts['include_pass']}/{counts['total']} eligible "
+                f"(conf≥{DAILY_THRESHOLD}: {counts['conf_pass']})"
+            )
+
         eligible = [
             c for c in candidates
-            if c.get("eval_daily", {}).get("confidence", 0)
-            >= self._config.DAILY_MIN_CONFIDENCE
+            if c.get("eval_daily", {}).get("confidence", 0) >= DAILY_THRESHOLD
             and c.get("eval_daily", {}).get("include_in_slip", False)
         ]
 
@@ -272,9 +293,14 @@ class SlipGenerator:
 
         logger.info(f"[GEN] Daily: {len(eligible)} eligible candidates")
 
-        # Assemble slip
-        slip_data = await self._intel.assemble_slip(
-            candidates=[{
+        # FIX 2: Use yes_ask directly for individual_odds; skip zero-odds candidates
+        daily_candidates = []
+        for c in eligible:
+            individual_odds = self._calc_odds(c["yes_ask"])
+            if individual_odds <= 0:
+                logger.debug(f"[GEN] Skipping {c['kalshi_ticker']} — zero odds")
+                continue
+            daily_candidates.append({
                 "game": c["game"],
                 "sport": c["sport"],
                 "market_type": c["market_type"],
@@ -282,14 +308,18 @@ class SlipGenerator:
                 "calibrated_line": c["eval_daily"].get("calibrated_line"),
                 "original_line": c.get("pick"),
                 "kalshi_ticker": c["kalshi_ticker"],
-                "individual_odds": self._calc_odds(
-                    1 / (c["eval_daily"]["win_probability"] / 100)
-                    if c["eval_daily"].get("win_probability", 0) > 0
-                    else c["yes_ask"]
-                ),
+                "individual_odds": individual_odds,
                 "confidence": c["eval_daily"]["confidence"],
                 "ai_reasoning": c["eval_daily"].get("reasoning", ""),
-            } for c in eligible],
+            })
+
+        if not daily_candidates:
+            logger.warning("[GEN] All eligible candidates had zero odds — skipping")
+            return None
+
+        # Assemble slip
+        slip_data = await self._intel.assemble_slip(
+            candidates=daily_candidates,
             slip_type="DAILY",
             target_odds=self._config.DAILY_TARGET_COMBINED,
             min_legs=self._config.DAILY_MIN_LEGS,
@@ -312,6 +342,21 @@ class SlipGenerator:
             if not slip_data:
                 return None
 
+        # FIX 4: Enrich AI-returned selected_legs with game_start from candidates
+        ticker_to_game_start = {
+            c["kalshi_ticker"]: c.get("game_start", "") for c in eligible
+        }
+        for leg in slip_data.get("selected_legs", []):
+            if not leg.get("game_start"):
+                leg["game_start"] = ticker_to_game_start.get(
+                    leg.get("kalshi_ticker", ""), ""
+                )
+
+        projected_finish = max(
+            (l.get("game_start", "") for l in slip_data["selected_legs"]),
+            default=""
+        )
+
         # Calculate stake
         stake = min(
             balance * self._config.DAILY_STAKE_PCT,
@@ -320,6 +365,12 @@ class SlipGenerator:
         stake = round(stake, 2)
         combined_odds = slip_data["combined_odds"]
         potential_payout = round(stake * combined_odds, 2)
+
+        logger.info(
+            f"[GEN] Saving daily slip | legs={len(slip_data['selected_legs'])} | "
+            f"odds={combined_odds:.2f}x | conf={slip_data.get('overall_confidence', 0):.1f} | "
+            f"stake=${stake:.2f} | finish={projected_finish}"
+        )
 
         # Save to database
         slip_id = self._db.save_slip(
@@ -332,10 +383,7 @@ class SlipGenerator:
                 "stake": stake,
                 "potential_payout": potential_payout,
                 "confidence": slip_data["overall_confidence"],
-                "projected_finish": max(
-                    (l.get("game_start", "") for l in slip_data["selected_legs"]),
-                    default=""
-                ),
+                "projected_finish": projected_finish,
             },
             legs=slip_data["selected_legs"],
         )
