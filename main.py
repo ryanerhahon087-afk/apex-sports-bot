@@ -58,6 +58,7 @@ bot_paused = False
 cb_active = False
 cb_resume_at = None
 last_generation_date = None
+generation_running = False   # lock: prevents background + manual button from overlapping
 
 
 def init_bot():
@@ -227,13 +228,19 @@ def start_rollover():
 @app.route("/api/generate", methods=["POST"])
 def generate_now():
     """Manually trigger slip generation."""
+    global generation_running
+
     if bot_paused:
         return jsonify({"error": "Bot is paused"}), 400
 
     if kalshi is None or generator is None:
         return jsonify({"error": "Bot not initialized yet, try again in 10 seconds"}), 503
 
+    if generation_running:
+        return jsonify({"error": "Generation already in progress, please wait"}), 409
+
     try:
+        generation_running = True
         async def _run():
             # Create a FRESH client + generator for this request's own event loop.
             # Never touch the global kalshi/_session — it belongs to the background
@@ -267,6 +274,8 @@ def generate_now():
         import traceback
         logger.error(f"[GEN] Generate endpoint error: {e}", exc_info=True)
         return jsonify({"error": str(e), "traceback": traceback.format_exc()[-500:]}), 500
+    finally:
+        generation_running = False
 
 
 @app.route("/api/pause", methods=["POST"])
@@ -1389,10 +1398,16 @@ async def run_background_tasks():
             if (GENERATION_HOUR_START <= eastern_hour < GENERATION_HOUR_END
                     and today != last_generation_date
                     and not bot_paused
-                    and not cb_active):
-                logger.info("[BOT] Generation window open — starting slip generation")
-                await generator.generate_all_slips()
-                last_generation_date = today
+                    and not cb_active
+                    and not generation_running):
+                global generation_running
+                generation_running = True
+                try:
+                    logger.info("[BOT] Generation window open — starting slip generation")
+                    await generator.generate_all_slips()
+                    last_generation_date = today
+                finally:
+                    generation_running = False
 
             await asyncio.sleep(300)  # Check every 5 minutes
 

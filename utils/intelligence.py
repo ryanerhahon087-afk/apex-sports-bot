@@ -87,37 +87,45 @@ After research, provide your analysis in this exact JSON format:
 
 Return ONLY the JSON, no other text."""
 
-        try:
-            response = self._client.messages.create(
-                model=self._model,
-                max_tokens=2000,
-                tools=[{"type": "web_search_20250305", "name": "web_search"}],
-                messages=[{"role": "user", "content": prompt}]
-            )
+        for attempt in range(4):  # up to 4 attempts with backoff
+            try:
+                response = self._client.messages.create(
+                    model=self._model,
+                    max_tokens=2000,
+                    tools=[{"type": "web_search_20250305", "name": "web_search"}],
+                    messages=[{"role": "user", "content": prompt}]
+                )
 
-            # Extract text from response
-            text = ""
-            for block in response.content:
-                if hasattr(block, "text"):
-                    text += block.text
+                # Extract text from response
+                text = ""
+                for block in response.content:
+                    if hasattr(block, "text"):
+                        text += block.text
 
-            # Parse JSON
-            text = text.strip()
-            if text.startswith("```"):
-                text = re.sub(r"```json?\n?", "", text).rstrip("`").strip()
+                # Parse JSON
+                text = text.strip()
+                if text.startswith("```"):
+                    text = re.sub(r"```json?\n?", "", text).rstrip("`").strip()
 
-            research = json.loads(text)
-            logger.info(f"[INTEL] Research complete: {game_title} | "
-                       f"quality={research.get('research_quality', 0)}")
-            return research
+                research = json.loads(text)
+                logger.info(f"[INTEL] Research complete: {game_title} | "
+                           f"quality={research.get('research_quality', 0)}")
+                return research
 
-        except Exception as e:
-            logger.error(f"[INTEL] Research failed for {game_title}: {e}")
-            return {
-                "game": game_title,
-                "research_quality": 0,
-                "error": str(e)
-            }
+            except Exception as e:
+                err_str = str(e)
+                if "429" in err_str or "rate_limit" in err_str.lower():
+                    wait = 30 * (2 ** attempt)  # 30s, 60s, 120s, 240s
+                    logger.warning(f"[INTEL] Rate limited on {game_title} "
+                                   f"(attempt {attempt+1}/4) — waiting {wait}s")
+                    import time
+                    time.sleep(wait)
+                    continue
+                logger.error(f"[INTEL] Research failed for {game_title}: {e}")
+                return {"game": game_title, "research_quality": 0, "error": err_str}
+
+        logger.error(f"[INTEL] Research exhausted retries for {game_title}")
+        return {"game": game_title, "research_quality": 0, "error": "rate_limit_retries_exhausted"}
 
     # ── PICK EVALUATION ───────────────────────────────────────────────────────
 
@@ -175,31 +183,44 @@ Respond in this exact JSON format:
 
 Return ONLY the JSON."""
 
-        try:
-            response = self._client.messages.create(
-                model=self._model,
-                max_tokens=800,
-                messages=[{"role": "user", "content": prompt}]
-            )
+        for attempt in range(4):
+            try:
+                response = self._client.messages.create(
+                    model=self._model,
+                    max_tokens=800,
+                    messages=[{"role": "user", "content": prompt}]
+                )
 
-            text = response.content[0].text.strip()
-            if text.startswith("```"):
-                text = re.sub(r"```json?\n?", "", text).rstrip("`").strip()
+                text = response.content[0].text.strip()
+                if text.startswith("```"):
+                    text = re.sub(r"```json?\n?", "", text).rstrip("`").strip()
 
-            evaluation = json.loads(text)
-            logger.info(f"[INTEL] Pick evaluated: {pick.get('pick')} | "
-                       f"conf={evaluation.get('confidence')} | "
-                       f"include={evaluation.get('include_in_slip')}")
-            return evaluation
+                evaluation = json.loads(text)
+                logger.info(f"[INTEL] Pick evaluated: {pick.get('pick')} | "
+                           f"conf={evaluation.get('confidence')} | "
+                           f"include={evaluation.get('include_in_slip')}")
+                return evaluation
 
-        except Exception as e:
-            logger.error(f"[INTEL] Evaluation failed: {e}")
-            return {
-                "pick": pick.get("pick"),
-                "confidence": 0,
-                "include_in_slip": False,
-                "reasoning": f"Evaluation error: {e}",
-            }
+            except Exception as e:
+                err_str = str(e)
+                if "429" in err_str or "rate_limit" in err_str.lower():
+                    wait = 30 * (2 ** attempt)  # 30s, 60s, 120s, 240s
+                    logger.warning(f"[INTEL] Rate limited on evaluate "
+                                   f"(attempt {attempt+1}/4) — waiting {wait}s")
+                    import time
+                    time.sleep(wait)
+                    continue
+                logger.error(f"[INTEL] Evaluation failed: {e}")
+                return {
+                    "pick": pick.get("pick"),
+                    "confidence": 0,
+                    "include_in_slip": False,
+                    "reasoning": f"Evaluation error: {e}",
+                }
+
+        logger.error("[INTEL] Evaluation exhausted retries")
+        return {"pick": pick.get("pick"), "confidence": 0,
+                "include_in_slip": False, "reasoning": "rate_limit_retries_exhausted"}
 
     def _calibration_buffer(self, slip_type: str) -> str:
         """Return calibration instructions based on slip type."""

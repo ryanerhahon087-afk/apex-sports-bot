@@ -202,9 +202,9 @@ class SlipGenerator:
                 research = {"research_quality": 0, "error": str(e)}
             game["research"] = research
             researched.append(game)
-            # Small delay between calls to avoid rate limits
+            # Delay between research calls — 5s keeps us well under 30k TPM
             if i < len(games) - 1:
-                await asyncio.sleep(2)
+                await asyncio.sleep(5)
 
         return researched
 
