@@ -182,17 +182,22 @@ class SlipGenerator:
     # ── RESEARCH ──────────────────────────────────────────────────────────────
 
     async def _research_all_games(self, games: list) -> list:
-        """Research all games in parallel."""
-        tasks = [self._intel.research_game(game) for game in games]
-        research_results = await asyncio.gather(*tasks, return_exceptions=True)
-
+        """
+        Research all games sequentially to stay within Anthropic rate limits.
+        Web-search research uses ~3k tokens per call; 20 parallel = 429 errors.
+        """
         researched = []
-        for game, research in zip(games, research_results):
-            if isinstance(research, Exception):
-                logger.error(f"[GEN] Research failed for {game['title']}: {research}")
-                research = {"research_quality": 0, "error": str(research)}
+        for i, game in enumerate(games):
+            try:
+                research = await self._intel.research_game(game)
+            except Exception as e:
+                logger.error(f"[GEN] Research failed for {game['title']}: {e}")
+                research = {"research_quality": 0, "error": str(e)}
             game["research"] = research
             researched.append(game)
+            # Small delay between calls to avoid rate limits
+            if i < len(games) - 1:
+                await asyncio.sleep(2)
 
         return researched
 
@@ -236,12 +241,13 @@ class SlipGenerator:
                 if pick["current_odds"] < 1.20:
                     continue
 
-                # Evaluate with AI
+                # Evaluate with AI — small delay between calls to respect rate limits
                 for slip_type in ["DAILY", "ROLLOVER", "LOTTO"]:
                     evaluation = await self._intel.evaluate_pick(
                         pick, research, slip_type
                     )
                     pick[f"eval_{slip_type.lower()}"] = evaluation
+                    await asyncio.sleep(1)
 
                 all_candidates.append(pick)
 
