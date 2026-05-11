@@ -1308,8 +1308,15 @@ def _next_generation_time() -> str:
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
 async def run_background_tasks():
-    """Background loop: check pending slips and run scheduled generation."""
+    """Background loop: initialize bot, check pending slips, run scheduled generation."""
     global bot_running, last_generation_date
+
+    # Init bot here so Flask can start first and pass the healthcheck
+    try:
+        init_bot()
+    except Exception as e:
+        logger.error(f"[BOT] init_bot failed: {e}", exc_info=True)
+        return
 
     await kalshi.connect()
     bot_running = True
@@ -1342,13 +1349,19 @@ async def run_background_tasks():
 
 def main():
     """Start the sports bot."""
+    import pathlib
+    # Ensure storage directory exists before anything else
+    pathlib.Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+
     logger.info("=" * 60)
     logger.info("  APEX/SPORTS BOT — STARTING")
     logger.info(f"  Paper mode: {PAPER_MODE}")
+    logger.info(f"  DB path: {DB_PATH}")
     logger.info(f"  Generation window: {GENERATION_HOUR_START}:00-{GENERATION_HOUR_END}:00 Eastern")
     logger.info("=" * 60)
 
-    init_bot()
+    # NOTE: init_bot() is called inside the background thread so Flask can
+    # bind first and pass Railway's healthcheck on /api/health.
 
     # Start background tasks in a separate thread
     import threading
