@@ -235,22 +235,31 @@ def generate_now():
 
     try:
         async def _run():
-            # Always close + recreate the aiohttp session in this event loop.
-            # kalshi._session was created in the background thread's loop and
-            # cannot be reused here — aiohttp raises "Timeout context manager
-            # should be used inside a task" if you try.
-            if kalshi._session:
-                try:
-                    await kalshi._session.close()
-                except Exception:
-                    pass
-                kalshi._session = None
-            await kalshi.connect()
-            result = await generator.generate_all_slips()
+            # Create a FRESH client + generator for this request's own event loop.
+            # Never touch the global kalshi/_session — it belongs to the background
+            # thread's loop and mixing loops causes "Event loop is closed" errors.
+            local_kalshi = SportsKalshiClient(
+                api_key_id=KALSHI_API_KEY_ID,
+                private_key_pem=KALSHI_PRIVATE_KEY,
+                base_url=KALSHI_BASE_URL,
+                paper_mode=PAPER_MODE,
+            )
+            await local_kalshi.connect()
+            local_gen = SlipGenerator(
+                kalshi_client=local_kalshi,
+                intelligence=intelligence,
+                database=db,
+                config=cfg,
+            )
+            try:
+                result = await local_gen.generate_all_slips()
+            finally:
+                await local_kalshi.disconnect()
             return result
 
         loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Do NOT call asyncio.set_event_loop(loop) — would replace the global
+        # event loop reference, potentially confusing the background thread.
         result = loop.run_until_complete(_run())
         loop.close()
         return jsonify({"success": True, "result": result})
