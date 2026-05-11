@@ -35,6 +35,19 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
+
+@app.errorhandler(Exception)
+def handle_any_exception(e):
+    """Catch-all: return JSON instead of Flask's default HTML 500 page."""
+    import traceback as tb
+    logger.error(f"[FLASK] Unhandled exception: {e}", exc_info=True)
+    return jsonify({
+        "error": str(e),
+        "type": type(e).__name__,
+        "traceback": tb.format_exc()[-1000:],
+    }), 500
+
+
 # ── GLOBAL BOT STATE ──────────────────────────────────────────────────────────
 db: Optional[SportsDatabase] = None
 kalshi: Optional[SportsKalshiClient] = None
