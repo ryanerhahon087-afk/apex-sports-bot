@@ -217,17 +217,25 @@ def generate_now():
     if bot_paused:
         return jsonify({"error": "Bot is paused"}), 400
 
-    async def _run():
-        await kalshi.connect()
-        result = await generator.generate_all_slips()
-        await kalshi.disconnect()
-        return result
+    if kalshi is None or generator is None:
+        return jsonify({"error": "Bot not initialized yet, try again in 10 seconds"}), 503
 
-    loop = asyncio.new_event_loop()
-    result = loop.run_until_complete(_run())
-    loop.close()
+    try:
+        async def _run():
+            if not kalshi._session:
+                await kalshi.connect()
+            result = await generator.generate_all_slips()
+            return result
 
-    return jsonify({"success": True, "result": result})
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(_run())
+        loop.close()
+        return jsonify({"success": True, "result": result})
+    except Exception as e:
+        import traceback
+        logger.error(f"[GEN] Generate endpoint error: {e}", exc_info=True)
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()[-500:]}), 500
 
 
 @app.route("/api/pause", methods=["POST"])
@@ -1318,7 +1326,12 @@ async def run_background_tasks():
         logger.error(f"[BOT] init_bot failed: {e}", exc_info=True)
         return
 
-    await kalshi.connect()
+    try:
+        await kalshi.connect()
+        logger.info("[BOT] Kalshi client connected successfully")
+    except Exception as e:
+        logger.error(f"[BOT] Kalshi connect failed: {e}", exc_info=True)
+        # Continue anyway — generate_now() will reconnect per-request
     bot_running = True
     logger.info("[BOT] Background tasks started")
 
