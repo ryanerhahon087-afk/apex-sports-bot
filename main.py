@@ -263,43 +263,81 @@ def probe_markets():
 
         out = {}
 
-        # 1. All series
-        data = await kalshi._get('/series', {'limit': 100})
-        series_list = data.get('series', [])
+        # 0. Raw /series response — see what keys come back
+        raw_series = await kalshi._get('/series', {'limit': 100})
+        out["series_raw_keys"] = list(raw_series.keys())
+        out["series_raw_count"] = {k: len(v) if isinstance(v, list) else v
+                                   for k, v in raw_series.items()}
+
+        # Try every possible list key
+        series_list = (raw_series.get('series') or
+                       raw_series.get('data') or
+                       raw_series.get('items') or
+                       raw_series.get('results') or [])
+        out["series_list_length"] = len(series_list)
+        if series_list:
+            out["series_first_item_keys"] = list(series_list[0].keys()) if series_list else []
+
         sports_keywords = ['NBA', 'MLB', 'NFL', 'NHL', 'SOCCER', 'MLS']
         sports_series = [
-            {"ticker": s.get("ticker"), "title": s.get("title")}
+            {"ticker": s.get("ticker", s.get("series_ticker", "")),
+             "title": s.get("title", "")}
             for s in series_list
-            if any(k in s.get('ticker', '').upper() for k in sports_keywords)
+            if any(k in (s.get('ticker', '') + s.get('series_ticker', '')).upper()
+                   for k in sports_keywords)
         ]
         out["all_sports_series"] = sports_series
 
-        # 2. Sample markets per series
+        # 1. Directly probe all known sports series tickers
+        known_series = [
+            "KXNBAGAME", "KXNBATOTAL", "KXMLBGAME", "KXMLBTOTAL",
+            "KXNFLGAME", "KXNHLTOTAL", "KXNHLGAME", "KXMLSSOCCER",
+            "KXNCAA", "KXSOCCER", "KXMLS",
+        ]
         samples = {}
-        for s in sports_series[:15]:
-            ticker = s["ticker"]
+        for series in known_series:
             mdata = await kalshi._get('/markets', {
-                'series_ticker': ticker,
+                'series_ticker': series,
                 'status': 'open',
                 'limit': 3,
             })
             markets = mdata.get('markets', [])
             if markets:
                 m = markets[0]
-                samples[ticker] = {
+                samples[series] = {
                     "count": len(markets),
                     "sample_title": m.get("title", ""),
                     "sample_ticker": m.get("ticker", ""),
                     "yes_ask": float(m.get("yes_ask_dollars") or 0),
                     "yes_bid": float(m.get("yes_bid_dollars") or 0),
-                    "close_time": m.get("close_time", ""),
+                    "close_time": m.get("close_time", "")[:19],
                     "event_ticker": m.get("event_ticker", ""),
                 }
             else:
-                samples[ticker] = {"count": 0}
-        out["series_samples"] = samples
+                samples[series] = {"count": 0}
+        out["known_series_probe"] = samples
 
-        # 3. Full structure of first available market
+        # 2. Also try /events endpoint to find sports events directly
+        events_data = await kalshi._get('/events', {
+            'status': 'open',
+            'limit': 20,
+        })
+        events = events_data.get('events', [])
+        sports_events = [
+            {
+                "ticker": e.get("event_ticker", ""),
+                "title": e.get("title", ""),
+                "series_ticker": e.get("series_ticker", ""),
+            }
+            for e in events
+            if any(k in (e.get('event_ticker', '') + e.get('series_ticker', '') +
+                         e.get('title', '')).upper()
+                   for k in sports_keywords)
+        ]
+        out["sports_events_sample"] = sports_events[:10]
+        out["total_open_events"] = len(events)
+
+        # 3. Full structure of first available market across known series
         for series in ["KXNBAGAME", "KXMLBGAME", "KXNBATOTAL", "KXMLBTOTAL"]:
             mdata = await kalshi._get('/markets', {
                 'series_ticker': series,
