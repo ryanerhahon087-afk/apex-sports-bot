@@ -251,6 +251,77 @@ def generate_now():
         return jsonify({"error": str(e), "traceback": traceback.format_exc()[-500:]}), 500
 
 
+@app.route("/api/probe", methods=["GET"])
+def probe_markets():
+    """Diagnostic endpoint: scan all series and return full market data."""
+    if kalshi is None:
+        return jsonify({"error": "Bot not initialized"}), 503
+
+    async def _run():
+        if not kalshi._session:
+            await kalshi.connect()
+
+        out = {}
+
+        # 1. All series
+        data = await kalshi._get('/series', {'limit': 100})
+        series_list = data.get('series', [])
+        sports_keywords = ['NBA', 'MLB', 'NFL', 'NHL', 'SOCCER', 'MLS']
+        sports_series = [
+            {"ticker": s.get("ticker"), "title": s.get("title")}
+            for s in series_list
+            if any(k in s.get('ticker', '').upper() for k in sports_keywords)
+        ]
+        out["all_sports_series"] = sports_series
+
+        # 2. Sample markets per series
+        samples = {}
+        for s in sports_series[:15]:
+            ticker = s["ticker"]
+            mdata = await kalshi._get('/markets', {
+                'series_ticker': ticker,
+                'status': 'open',
+                'limit': 3,
+            })
+            markets = mdata.get('markets', [])
+            if markets:
+                m = markets[0]
+                samples[ticker] = {
+                    "count": len(markets),
+                    "sample_title": m.get("title", ""),
+                    "sample_ticker": m.get("ticker", ""),
+                    "yes_ask": float(m.get("yes_ask_dollars") or 0),
+                    "yes_bid": float(m.get("yes_bid_dollars") or 0),
+                    "close_time": m.get("close_time", ""),
+                    "event_ticker": m.get("event_ticker", ""),
+                }
+            else:
+                samples[ticker] = {"count": 0}
+        out["series_samples"] = samples
+
+        # 3. Full structure of first available market
+        for series in ["KXNBAGAME", "KXMLBGAME", "KXNBATOTAL", "KXMLBTOTAL"]:
+            mdata = await kalshi._get('/markets', {
+                'series_ticker': series,
+                'status': 'open',
+                'limit': 1,
+            })
+            markets = mdata.get('markets', [])
+            if markets:
+                out["full_market_example"] = {"series": series, "market": markets[0]}
+                break
+        else:
+            out["full_market_example"] = None
+
+        return out
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    result = loop.run_until_complete(_run())
+    loop.close()
+    return jsonify(result)
+
+
 @app.route("/api/pause", methods=["POST"])
 def toggle_pause():
     global bot_paused
