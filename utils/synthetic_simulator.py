@@ -161,16 +161,18 @@ class SyntheticGameGenerator:
             0.5 + home_edge + scenario["home_win_modifier"]))
         home_wins = random.random() < home_win_prob
 
-        # Actual scores
+        # Actual scores — realistic margin-based split
+        # Winner gets ~50-65% of the total, loser gets the rest
+        margin = random.uniform(3, 22)   # realistic NBA winning margin
         if home_wins:
-            home_score = int(true_total * (home_win_prob + 0.1))
+            home_score = round((true_total + margin) / 2)
             away_score = true_total - home_score
         else:
-            away_score = int(true_total * (1 - home_win_prob + 0.1))
+            away_score = round((true_total + margin) / 2)
             home_score = true_total - away_score
 
-        home_score  = max(85, int(home_score))
-        away_score  = max(85, int(away_score))
+        home_score   = max(88, int(home_score))
+        away_score   = max(88, int(away_score))
         actual_total = home_score + away_score
 
         winner_prob_ask = round(home_win_prob + random.uniform(-0.04, 0.04), 2)
@@ -376,7 +378,7 @@ class SyntheticSimulator:
         rollover_active    = False
         rollover_stake     = round(starting_balance * 0.10, 2)
         rollover_day       = 0
-        rollover_target    = 3.0
+        rollover_target    = 1.8   # 2-leg parlay @ ~1.4x each = ~2.0x easily achieved
         rollover_days_won  = 0
         rollover_completed = False
         rollover_payout    = 0.0
@@ -441,7 +443,7 @@ class SyntheticSimulator:
                     min_legs=2, max_legs=3, fixed_stake=rollover_stake,
                 )
 
-                if ro and ro.get("combined_odds", 0) >= 2.5:
+                if ro and ro.get("combined_odds", 0) >= 1.5:
                     if ro["won"]:
                         ro_payout = round(rollover_stake * ro["combined_odds"], 2)
                         rollover_days_won += 1
