@@ -1,7 +1,7 @@
 """
 APEX/SPORTS BOT — Main Entry Point
 Runs the dashboard server and slip generation scheduler.
-Build: 2026-05-12-v7
+Build: 2026-05-12-v8
 """
 import asyncio
 import json

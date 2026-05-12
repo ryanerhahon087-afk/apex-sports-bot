@@ -235,7 +235,13 @@ class SlipGenerator:
         """
         For each game, evaluate the available market picks.
         Returns flat list of evaluated candidates.
+
+        To stay within Anthropic rate limits, each game's markets are first
+        filtered to the MAX_MARKETS_PER_TYPE most liquid lines per market type
+        (closest to 50¢ yes_ask = highest two-way interest). This prevents
+        evaluating 30+ line variants on NBA total markets.
         """
+        MAX_MARKETS_PER_TYPE = 3   # evaluate top-3 lines per market type per game
         all_candidates = []
 
         for game in researched_games:
@@ -245,7 +251,26 @@ class SlipGenerator:
                             f"low research quality")
                 continue
 
-            for market in game.get("markets", []):
+            # Group markets by type, keep only the most liquid lines
+            markets_by_type: dict = {}
+            for m in game.get("markets", []):
+                mtype = m.get("market_type", "OTHER")
+                markets_by_type.setdefault(mtype, []).append(m)
+
+            # For each market type, pick the top-N lines closest to 50¢ (most liquid)
+            top_markets = []
+            for mtype, mlist in markets_by_type.items():
+                mlist.sort(key=lambda m: abs(m.get("yes_ask", 0) - 0.50))
+                top_markets.extend(mlist[:MAX_MARKETS_PER_TYPE])
+
+            skipped = len(game.get("markets", [])) - len(top_markets)
+            if skipped > 0:
+                logger.debug(
+                    f"[GEN] {game['title']}: kept {len(top_markets)} markets "
+                    f"(skipped {skipped} low-liquidity lines)"
+                )
+
+            for market in top_markets:
                 # Build pick dict
                 pick = {
                     "game": game["title"],
