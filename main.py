@@ -23,6 +23,7 @@ from data.kalshi_client import SportsKalshiClient
 from utils.intelligence import SportsIntelligence
 from utils.slip_generator import SlipGenerator
 from utils.backtester import BacktestEngine
+from utils.synthetic_simulator import SyntheticSimulator
 import config.config as cfg
 
 # ── LOGGING ───────────────────────────────────────────────────────────────────
@@ -62,6 +63,8 @@ cb_resume_at = None
 last_generation_date = None
 generation_running = False   # lock: prevents background + manual button from overlapping
 backtest_running   = False   # lock: one backtest at a time
+simulation_running = False   # lock: one simulation at a time
+latest_sim_result  = None    # in-memory store for latest simulation result
 
 
 def init_bot():
@@ -352,6 +355,67 @@ def get_backtest_results():
     return jsonify({
         "running": backtest_running,
         "result":  result,
+    })
+
+
+@app.route("/api/simulate", methods=["POST"])
+def run_simulate():
+    """Launch a synthetic simulation in a background thread."""
+    global simulation_running, latest_sim_result
+    if simulation_running:
+        return jsonify({"error": "Simulation already running — poll /api/simulate/results"}), 409
+
+    data = request.get_json(silent=True) or {}
+    days       = int(data.get("days", 10))
+    difficulty = data.get("difficulty", "mixed")
+    starting   = float(data.get("starting_balance", 100.0))
+
+    days = min(max(days, 1), 30)
+
+    import threading
+
+    def _run():
+        global simulation_running, latest_sim_result
+        try:
+            sim = SyntheticSimulator(intelligence=intelligence, database=db)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(
+                sim.run_simulation(days=days, starting_balance=starting, difficulty=difficulty)
+            )
+            loop.close()
+            latest_sim_result = {
+                "days":             days,
+                "difficulty":       difficulty,
+                "starting_balance": starting,
+                "run_at":           datetime.now(timezone.utc).isoformat(),
+                "report":           result,
+            }
+            logger.info(f"[SIM] Complete — {days}d {difficulty}")
+        except Exception as exc:
+            logger.error(f"[SIM] Error: {exc}", exc_info=True)
+            latest_sim_result = {"error": str(exc)}
+        finally:
+            simulation_running = False
+
+    simulation_running = True
+    threading.Thread(target=_run, daemon=True).start()
+
+    return jsonify({
+        "status":  "started",
+        "days":    days,
+        "difficulty": difficulty,
+        "message": f"Running {days}-day {difficulty} simulation in background. "
+                   f"Poll /api/simulate/results for completion.",
+    })
+
+
+@app.route("/api/simulate/results")
+def get_simulate_results():
+    """Return the latest simulation result plus running state."""
+    return jsonify({
+        "running": simulation_running,
+        "result":  latest_sim_result,
     })
 
 
@@ -865,6 +929,35 @@ body::before { content:''; position:fixed; inset:0; background:radial-gradient(e
     <div id="bt-results">
       <div style="text-align:center;padding:24px;color:var(--muted);font-size:13px">
         No backtest run yet — click Run Backtest to simulate the past week's picks
+      </div>
+    </div>
+  </div>
+
+  <!-- SYNTHETIC SIMULATOR -->
+  <div class="card" style="margin-bottom:24px">
+    <div class="card-hdr" style="margin-bottom:18px">
+      <div class="card-title">
+        <span class="card-dot" style="background:var(--gold)"></span>
+        Synthetic Game Simulator
+      </div>
+      <div class="bt-run-row">
+        <select id="sim-difficulty" class="bt-days-select">
+          <option value="easy">Easy (high conf)</option>
+          <option value="mixed" selected>Mixed</option>
+          <option value="hard">Hard (low conf)</option>
+        </select>
+        <select id="sim-days" class="bt-days-select">
+          <option value="5">5 days</option>
+          <option value="10" selected>10 days</option>
+          <option value="14">14 days</option>
+        </select>
+        <button class="ctrl-btn" id="sim-run-btn" onclick="runSimulation()" style="border-color:var(--gold);color:var(--gold)">🎮 Run Simulation</button>
+        <span id="sim-status" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+    </div>
+    <div id="sim-results">
+      <div style="text-align:center;padding:24px;color:var(--muted);font-size:13px">
+        No simulation run yet — pick a difficulty and click Run Simulation
       </div>
     </div>
   </div>
@@ -1561,6 +1654,152 @@ async function fetchBacktestResults() {
   } catch(e) {}
 }
 
+// ── SIMULATOR ────────────────────────────────────────────────────────────────
+let simPollTimer = null;
+
+async function runSimulation() {
+  const difficulty = document.getElementById('sim-difficulty').value;
+  const days       = parseInt(document.getElementById('sim-days').value) || 10;
+  const btn        = document.getElementById('sim-run-btn');
+  const stat       = document.getElementById('sim-status');
+
+  if (!confirm(`Run a ${days}-day ${difficulty} synthetic simulation? This uses AI calls (~${days*2} min).`)) return;
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Starting…';
+  stat.textContent = '';
+
+  try {
+    const r = await fetch('/api/simulate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ days, difficulty, starting_balance: 100.0 }),
+    });
+    const d = await r.json();
+
+    if (d.error) {
+      stat.textContent = '❌ ' + d.error;
+      btn.disabled = false;
+      btn.textContent = '🎮 Run Simulation';
+      return;
+    }
+
+    btn.textContent = '⏳ Running…';
+    stat.textContent = `${days}-day ${difficulty} simulation running (~${days*2} min)…`;
+    _simStartPolling();
+
+  } catch(e) {
+    stat.textContent = '❌ ' + e.message;
+    btn.disabled = false;
+    btn.textContent = '🎮 Run Simulation';
+  }
+}
+
+function _simStartPolling() {
+  if (simPollTimer) clearInterval(simPollTimer);
+  simPollTimer = setInterval(async () => {
+    try {
+      const r = await fetch('/api/simulate/results');
+      const d = await r.json();
+      if (!d.running && d.result) {
+        clearInterval(simPollTimer);
+        simPollTimer = null;
+        _renderSimResults(d.result);
+        document.getElementById('sim-run-btn').disabled = false;
+        document.getElementById('sim-run-btn').textContent = '🎮 Run Simulation';
+        document.getElementById('sim-status').textContent = '✅ Complete';
+      }
+    } catch(e) {}
+  }, 20000);
+}
+
+function _renderSimResults(res) {
+  if (res.error) {
+    document.getElementById('sim-results').innerHTML =
+      `<div style="color:var(--red);padding:16px">❌ ${res.error}</div>`;
+    return;
+  }
+  const report = res.report || {};
+  const days   = report.daily_breakdown || [];
+
+  const pnlColor = (report.total_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+  const pnlSign  = (report.total_pnl || 0) >= 0 ? '+' : '';
+  const diff     = res.difficulty || '?';
+  const diffColor = diff === 'easy' ? 'var(--green)' : diff === 'hard' ? 'var(--red)' : 'var(--gold)';
+
+  const summary = `
+    <div class="bt-summary">
+      <div class="bt-sum-item">
+        <div class="bt-sum-label">Slip Win Rate</div>
+        <div class="bt-sum-value" style="color:${(report.slip_win_rate||0)>=50?'var(--green)':'var(--red)'}">${(report.slip_win_rate||0).toFixed(1)}%</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">${report.winning_slips||0}/${report.total_slips||0} slips</div>
+      </div>
+      <div class="bt-sum-item">
+        <div class="bt-sum-label">Leg Win Rate</div>
+        <div class="bt-sum-value" style="color:${(report.leg_win_rate||0)>=50?'var(--green)':'var(--gold)'}">${(report.leg_win_rate||0).toFixed(1)}%</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">${report.winning_legs||0}/${report.total_legs||0} legs</div>
+      </div>
+      <div class="bt-sum-item">
+        <div class="bt-sum-label">Total P&amp;L</div>
+        <div class="bt-sum-value" style="color:${pnlColor}">${pnlSign}$${Math.abs(report.total_pnl||0).toFixed(2)}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">$${(res.starting_balance||100).toFixed(0)} → $${(report.ending_balance||0).toFixed(2)}</div>
+      </div>
+      <div class="bt-sum-item">
+        <div class="bt-sum-label">Difficulty</div>
+        <div class="bt-sum-value" style="color:${diffColor};font-size:16px;text-transform:uppercase">${diff}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">${res.days||'?'}d sim</div>
+      </div>
+    </div>`;
+
+  const rows = days.map(day => {
+    const legRows = (day.legs||[]).map(leg => {
+      const wonCls  = leg.won ? 'bt-leg-won' : 'bt-leg-lost';
+      const wonIcon = leg.won ? '✓' : '✗';
+      const conf    = leg.confidence ? ` <span style="color:var(--muted);font-size:10px">[${leg.confidence.toFixed(1)}]</span>` : '';
+      return `<div class="bt-leg ${wonCls}">${wonIcon} ${leg.pick||leg.game||''}${conf}</div>`;
+    }).join('');
+
+    const pnl    = day.pnl || 0;
+    const pnlCls = pnl >= 0 ? 'bt-win' : 'bt-loss';
+    const pnlTxt = (pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2);
+    const roTag  = day.slip_type === 'ROLLOVER' ? '<span style="font-size:10px;color:var(--purple);margin-left:4px">[RO]</span>' : '';
+
+    return `<tr>
+      <td style="font-family:'Space Mono';font-size:12px;color:var(--muted)">${day.date||''}</td>
+      <td>${legRows || '<span style="color:var(--muted);font-size:11px">no legs</span>'}${roTag}</td>
+      <td style="font-family:'Space Mono';font-size:12px">${(day.combined_odds||0).toFixed(2)}x</td>
+      <td style="font-family:'Space Mono';font-size:12px">$${(day.stake||0).toFixed(2)}</td>
+      <td class="${pnlCls}">${pnlTxt}</td>
+      <td style="font-family:'Space Mono';font-size:12px;color:var(--muted)">$${(day.balance_after||0).toFixed(2)}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">No daily data</td></tr>';
+
+  const runAt = res.run_at ? new Date(res.run_at).toLocaleString() : '';
+
+  document.getElementById('sim-results').innerHTML = summary + `
+    <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Run at: ${runAt}</div>
+    <div style="overflow-x:auto">
+      <table class="bt-day-table">
+        <thead><tr><th>Date</th><th>Picks</th><th>Odds</th><th>Stake</th><th>P&L</th><th>Balance</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+async function fetchSimulationResults() {
+  try {
+    const r = await fetch('/api/simulate/results');
+    const d = await r.json();
+    if (d.result) _renderSimResults(d.result);
+    if (d.running) {
+      document.getElementById('sim-run-btn').disabled = true;
+      document.getElementById('sim-run-btn').textContent = '⏳ Running…';
+      document.getElementById('sim-status').textContent = 'Simulation in progress…';
+      _simStartPolling();
+    }
+  } catch(e) {}
+}
+
 // ── HELPERS ───────────────────────────────────────────────────────────────────
 function formatTime(isoStr) {
   if (!isoStr) return '—';
@@ -1592,6 +1831,7 @@ function init() {
   fetchRollover();
   fetchStats();
   fetchBacktestResults();
+  fetchSimulationResults();
   loadChart('1d', document.querySelector('.tog-btn.active'));
   calcRollover();
 
