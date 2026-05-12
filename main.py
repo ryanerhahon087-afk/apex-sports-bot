@@ -1716,63 +1716,115 @@ function _simStartPolling() {
 function _renderSimResults(res) {
   if (res.error) {
     document.getElementById('sim-results').innerHTML =
-      `<div style="color:var(--red);padding:16px">❌ ${res.error}</div>`;
+      `<div style="color:var(--red);padding:16px">&#10060; ${res.error}</div>`;
     return;
   }
   const report = res.report || {};
   const days   = report.daily_breakdown || [];
 
-  const pnlColor = (report.total_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
-  const pnlSign  = (report.total_pnl || 0) >= 0 ? '+' : '';
-  const diff     = res.difficulty || '?';
+  const totalPnl  = report.total_pnl || 0;
+  const pnlColor  = totalPnl >= 0 ? 'var(--green)' : 'var(--red)';
+  const pnlSign   = totalPnl >= 0 ? '+' : '';
+  const diff      = res.difficulty || '?';
   const diffColor = diff === 'easy' ? 'var(--green)' : diff === 'hard' ? 'var(--red)' : 'var(--gold)';
+
+  const roMaxDay  = report.rollover_days_won || 0;
+  const roComp    = report.rollover_completed;
+  const roStatus  = roComp
+    ? '<span style="color:var(--green)">COMPLETED</span>'
+    : roMaxDay > 0
+      ? `<span style="color:var(--gold)">${roMaxDay}/5 days won</span>`
+      : '<span style="color:var(--muted)">not started</span>';
 
   const summary = `
     <div class="bt-summary">
       <div class="bt-sum-item">
-        <div class="bt-sum-label">Slip Win Rate</div>
-        <div class="bt-sum-value" style="color:${(report.slip_win_rate||0)>=50?'var(--green)':'var(--red)'}">${(report.slip_win_rate||0).toFixed(1)}%</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">${report.winning_slips||0}/${report.total_slips||0} slips</div>
-      </div>
-      <div class="bt-sum-item">
-        <div class="bt-sum-label">Leg Win Rate</div>
-        <div class="bt-sum-value" style="color:${(report.leg_win_rate||0)>=50?'var(--green)':'var(--gold)'}">${(report.leg_win_rate||0).toFixed(1)}%</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">${report.winning_legs||0}/${report.total_legs||0} legs</div>
+        <div class="bt-sum-label">Daily Win Rate</div>
+        <div class="bt-sum-value" style="color:${(report.daily_win_rate||0)>=50?'var(--green)':'var(--red)'}">${(report.daily_win_rate||0).toFixed(1)}%</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">${report.daily_slips_won||0}/${report.daily_slips_total||0} slips won</div>
       </div>
       <div class="bt-sum-item">
         <div class="bt-sum-label">Total P&amp;L</div>
-        <div class="bt-sum-value" style="color:${pnlColor}">${pnlSign}$${Math.abs(report.total_pnl||0).toFixed(2)}</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">$${(res.starting_balance||100).toFixed(0)} → $${(report.ending_balance||0).toFixed(2)}</div>
+        <div class="bt-sum-value" style="color:${pnlColor}">${pnlSign}$${Math.abs(totalPnl).toFixed(2)}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">$${(res.starting_balance||100).toFixed(0)} to $${(report.ending_balance||0).toFixed(2)}</div>
+      </div>
+      <div class="bt-sum-item">
+        <div class="bt-sum-label">5-Day Rollover</div>
+        <div class="bt-sum-value" style="font-size:15px">${roStatus}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">payout $${(report.rollover_payout||0).toFixed(2)}</div>
       </div>
       <div class="bt-sum-item">
         <div class="bt-sum-label">Difficulty</div>
         <div class="bt-sum-value" style="color:${diffColor};font-size:16px;text-transform:uppercase">${diff}</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">${res.days||'?'}d sim</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">${res.days||'?'}d progressive</div>
       </div>
     </div>`;
 
-  const rows = days.map(day => {
-    const legRows = (day.legs||[]).map(leg => {
-      const wonCls  = leg.won ? 'bt-leg-won' : 'bt-leg-lost';
-      const wonIcon = leg.won ? '✓' : '✗';
-      const conf    = leg.confidence ? ` <span style="color:var(--muted);font-size:10px">[${leg.confidence.toFixed(1)}]</span>` : '';
-      return `<div class="bt-leg ${wonCls}">${wonIcon} ${leg.pick||leg.game||''}${conf}</div>`;
-    }).join('');
+  function _diffBadge(d) {
+    const c = d === 'easy' ? 'var(--green)' : d === 'hard' ? 'var(--red)' : 'var(--gold)';
+    return `<span style="font-size:9px;font-weight:700;color:${c};border:1px solid ${c};padding:1px 5px;border-radius:3px;text-transform:uppercase;margin-right:4px">${d||'?'}</span>`;
+  }
 
-    const pnl    = day.pnl || 0;
-    const pnlCls = pnl >= 0 ? 'bt-win' : 'bt-loss';
-    const pnlTxt = (pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2);
-    const roTag  = day.slip_type === 'ROLLOVER' ? '<span style="font-size:10px;color:var(--purple);margin-left:4px">[RO]</span>' : '';
+  const rows = days.map(day => {
+    const dl  = day.daily || null;
+    const ro  = day.rollover || null;
+    const dif = day.difficulty || '?';
+    const scenarios = (day.scenarios || []).filter(Boolean);
+
+    // Day label + difficulty badge
+    const dayLabel = `<div style="font-family:'Space Mono';font-size:11px;color:var(--muted)">${day.date||''}</div>
+      <div style="margin-top:3px">${_diffBadge(dif)}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:3px">${day.candidates_found||0} cands</div>`;
+
+    // Rollover status cell
+    let roCell = '';
+    if (day.rollover_completed) {
+      roCell = `<div style="font-size:10px;color:var(--green);font-weight:700">RO DONE!</div>`;
+    } else if (day.rollover_active) {
+      roCell = `<div style="font-size:10px;color:var(--purple)">RO Day ${day.rollover_day}/5</div>
+        <div style="font-size:10px;color:var(--muted)">stake $${(day.rollover_stake||0).toFixed(2)}</div>`;
+    }
+    if (ro) {
+      const roCls = ro.result === 'WON' ? 'color:var(--green)' : 'color:var(--red)';
+      roCell += `<div style="font-size:10px;${roCls};font-weight:600">RO: ${ro.result}</div>`;
+    }
+
+    // Picks column — game title + pick + won/lost
+    let picksHtml = '';
+    if (dl && dl.legs && dl.legs.length) {
+      picksHtml = dl.legs.map(leg => {
+        const wonCls  = leg.won ? 'bt-leg-won' : 'bt-leg-lost';
+        const wonIcon = leg.won ? '&#10003;' : '&#10007;';
+        const game    = leg.game ? `<span style="color:var(--muted);font-size:10px">${leg.game}</span><br>` : '';
+        const conf    = leg.confidence ? ` <span style="color:var(--muted);font-size:10px">[${Number(leg.confidence).toFixed(1)}]</span>` : '';
+        return `<div class="bt-leg ${wonCls}" style="margin-bottom:3px">${game}${wonIcon} ${leg.pick||''}${conf}</div>`;
+      }).join('');
+    } else {
+      picksHtml = `<span style="color:var(--muted);font-size:11px">no slip (${day.candidates_found||0} cands &lt; 2)</span>`;
+    }
+
+    // Scenario descriptions (first unique one)
+    const scen = scenarios.length ? `<div style="font-size:10px;color:var(--muted);font-style:italic;margin-top:4px">${[...new Set(scenarios)].slice(0,2).join(' | ')}</div>` : '';
+
+    // P&L
+    const pnl    = dl ? (dl.pnl || 0) : null;
+    const pnlTxt = pnl !== null ? ((pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2)) : '—';
+    const pnlCls = pnl !== null ? (pnl >= 0 ? 'bt-win' : 'bt-loss') : '';
+
+    const odds    = dl ? (dl.combined_odds || 0) : 0;
+    const stake   = dl ? (dl.stake || 0) : 0;
+    const balAfter = dl ? (dl.balance_after || day.balance || 0) : (day.balance || 0);
 
     return `<tr>
-      <td style="font-family:'Space Mono';font-size:12px;color:var(--muted)">${day.date||''}</td>
-      <td>${legRows || '<span style="color:var(--muted);font-size:11px">no legs</span>'}${roTag}</td>
-      <td style="font-family:'Space Mono';font-size:12px">${(day.combined_odds||0).toFixed(2)}x</td>
-      <td style="font-family:'Space Mono';font-size:12px">$${(day.stake||0).toFixed(2)}</td>
-      <td class="${pnlCls}">${pnlTxt}</td>
-      <td style="font-family:'Space Mono';font-size:12px;color:var(--muted)">$${(day.balance_after||0).toFixed(2)}</td>
+      <td>${dayLabel}</td>
+      <td>${picksHtml}${scen}</td>
+      <td style="vertical-align:top">${roCell}</td>
+      <td style="font-family:'Space Mono';font-size:12px;vertical-align:top">${odds ? odds.toFixed(2)+'x' : '—'}</td>
+      <td style="font-family:'Space Mono';font-size:12px;vertical-align:top">${stake ? '$'+stake.toFixed(2) : '—'}</td>
+      <td class="${pnlCls}" style="vertical-align:top">${pnlTxt}</td>
+      <td style="font-family:'Space Mono';font-size:12px;color:var(--muted);vertical-align:top">$${balAfter.toFixed(2)}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">No daily data</td></tr>';
+  }).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">No daily data</td></tr>';
 
   const runAt = res.run_at ? new Date(res.run_at).toLocaleString() : '';
 
@@ -1780,7 +1832,7 @@ function _renderSimResults(res) {
     <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Run at: ${runAt}</div>
     <div style="overflow-x:auto">
       <table class="bt-day-table">
-        <thead><tr><th>Date</th><th>Picks</th><th>Odds</th><th>Stake</th><th>P&L</th><th>Balance</th></tr></thead>
+        <thead><tr><th>Day</th><th>Picks</th><th>Rollover</th><th>Odds</th><th>Stake</th><th>P&amp;L</th><th>Balance</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`;

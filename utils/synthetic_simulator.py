@@ -237,26 +237,35 @@ class SyntheticGameGenerator:
 
         scenario = self._generate_scenario(difficulty)
 
+        # MLB scenario modifier is NBA-scale; scale it down to MLB context
+        mlb_mod = scenario["total_modifier"] * 0.1
+
         expected_home = (home["avg_runs_scored"] * 0.5 +
                          away["avg_runs_allowed"] * 0.5 +
                          home["home_boost"] +
-                         scenario["total_modifier"] * 0.3)
+                         mlb_mod)
         expected_away = (away["avg_runs_scored"] * 0.5 +
                          home["avg_runs_allowed"] * 0.5 +
-                         scenario["total_modifier"] * 0.3)
+                         mlb_mod)
 
         expected_home = max(1.0, expected_home)
         expected_away = max(1.0, expected_away)
 
-        home_runs   = self._poisson(expected_home)
-        away_runs   = self._poisson(expected_away)
+        home_runs    = self._poisson(expected_home)
+        away_runs    = self._poisson(expected_away)
         actual_total = home_runs + away_runs
 
         expected_total = expected_home + expected_away
-        market_line = round(expected_total * 2) / 2
+        # Cap market line at 10.5 — realistic MLB total ceiling
+        market_line = min(10.5, round(expected_total * 2) / 2)
 
-        lines = [market_line - 1.5, market_line - 0.5,
-                 market_line + 0.5, market_line + 1.5]
+        # Lines capped at 9.5 to stay in realistic MLB range
+        lines = [
+            min(9.5, market_line - 1.5),
+            min(9.5, market_line - 0.5),
+            min(9.5, market_line + 0.5),
+            min(9.5, market_line + 1.5),
+        ]
 
         line_markets = []
         for line in lines:
@@ -390,13 +399,28 @@ class SyntheticSimulator:
 
         for day_num in range(1, days + 1):
             date_str = f"Simulation Day {day_num}"
+
+            # Difficulty progression (only when caller chose "mixed")
+            if difficulty == "mixed":
+                if day_num <= 3:
+                    day_difficulty = "easy"
+                elif day_num <= 6:
+                    day_difficulty = "hard"
+                elif day_num <= 9:
+                    day_difficulty = "medium"
+                else:
+                    day_difficulty = "medium"   # Day 10 recovery test
+            else:
+                day_difficulty = difficulty
+
             logger.info(
-                f"[SIM] ── Day {day_num}/{days} | balance=${balance:.2f}"
+                f"[SIM] ── Day {day_num}/{days} | "
+                f"difficulty={day_difficulty} | balance=${balance:.2f}"
             )
 
             # 1. Generate games (AI will NOT see _true_result)
             games     = self._generator.generate_day(
-                date_str, n_nba=3, n_mlb=2, difficulty=difficulty
+                date_str, n_nba=3, n_mlb=2, difficulty=day_difficulty
             )
             games_for_ai = [
                 {k: v for k, v in g.items() if not k.startswith("_")}
@@ -481,12 +505,21 @@ class SyntheticSimulator:
             results.append({
                 "day":               day_num,
                 "date":              date_str,
+                "difficulty":        day_difficulty,
                 "balance":           balance,
                 "daily":             daily_result,
                 "rollover":          rollover_result,
+                "rollover_day":      rollover_day,
+                "rollover_stake":    round(rollover_stake, 2),
+                "rollover_active":   rollover_active,
+                "rollover_completed": rollover_completed,
                 "games_generated":   len(games),
                 "candidates_found":  len(candidates),
                 "game_summaries":    self._summarise_games(games),
+                "scenarios":         [
+                    g.get("scenario_description", "")
+                    for g in games_for_ai
+                ],
             })
 
         # Final summary
