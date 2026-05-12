@@ -1367,7 +1367,7 @@ def _next_generation_time() -> str:
 
 async def run_background_tasks():
     """Background loop: initialize bot, check pending slips, run scheduled generation."""
-    global bot_running, last_generation_date
+    global bot_running, last_generation_date, generation_running
 
     # Init bot here so Flask can start first and pass the healthcheck
     try:
@@ -1400,7 +1400,6 @@ async def run_background_tasks():
                     and not bot_paused
                     and not cb_active
                     and not generation_running):
-                global generation_running
                 generation_running = True
                 try:
                     logger.info("[BOT] Generation window open — starting slip generation")
@@ -1426,6 +1425,7 @@ def main():
     logger.info("  APEX/SPORTS BOT — STARTING")
     logger.info(f"  Paper mode: {PAPER_MODE}")
     logger.info(f"  DB path: {DB_PATH}")
+    logger.info(f"  Port: {DASHBOARD_PORT}")
     logger.info(f"  Generation window: {GENERATION_HOUR_START}:00-{GENERATION_HOUR_END}:00 Eastern")
     logger.info("=" * 60)
 
@@ -1436,9 +1436,12 @@ def main():
     import threading
 
     def run_async():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(run_background_tasks())
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(run_background_tasks())
+        except BaseException as e:
+            logger.error(f"[BG] Background thread crashed: {type(e).__name__}: {e}", exc_info=True)
 
     bg_thread = threading.Thread(target=run_async, daemon=True)
     bg_thread.start()

@@ -118,8 +118,7 @@ Return ONLY the JSON, no other text."""
                     wait = 30 * (2 ** attempt)  # 30s, 60s, 120s, 240s
                     logger.warning(f"[INTEL] Rate limited on {game_title} "
                                    f"(attempt {attempt+1}/4) — waiting {wait}s")
-                    import time
-                    time.sleep(wait)
+                    await asyncio.sleep(wait)
                     continue
                 logger.error(f"[INTEL] Research failed for {game_title}: {e}")
                 return {"game": game_title, "research_quality": 0, "error": err_str}
@@ -207,8 +206,7 @@ Return ONLY the JSON."""
                     wait = 30 * (2 ** attempt)  # 30s, 60s, 120s, 240s
                     logger.warning(f"[INTEL] Rate limited on evaluate "
                                    f"(attempt {attempt+1}/4) — waiting {wait}s")
-                    import time
-                    time.sleep(wait)
+                    await asyncio.sleep(wait)
                     continue
                 logger.error(f"[INTEL] Evaluation failed: {e}")
                 return {
