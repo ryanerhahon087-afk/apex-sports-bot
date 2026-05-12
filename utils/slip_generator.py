@@ -222,9 +222,10 @@ class SlipGenerator:
                 research = {"research_quality": 0, "error": str(e)}
             game["research"] = research
             researched.append(game)
-            # Delay between research calls — 5s keeps us well under 30k TPM
+            # 15s between research calls — at 3k tokens/call this keeps us safely
+            # under Anthropic's 30k TPM burst limit and avoids cascading 429s
             if i < len(games) - 1:
-                await asyncio.sleep(5)
+                await asyncio.sleep(15)
 
         return researched
 
@@ -268,13 +269,13 @@ class SlipGenerator:
                 if pick["current_odds"] < 1.20:
                     continue
 
-                # Evaluate with AI — small delay between calls to respect rate limits
+                # Evaluate with AI — 5s between slip-type evaluations
                 for slip_type in ["DAILY", "ROLLOVER", "LOTTO"]:
                     evaluation = await self._intel.evaluate_pick(
                         pick, research, slip_type
                     )
                     pick[f"eval_{slip_type.lower()}"] = evaluation
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(5)
 
                 all_candidates.append(pick)
 
