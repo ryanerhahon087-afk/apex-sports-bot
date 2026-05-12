@@ -28,10 +28,11 @@ class SportsIntelligence:
 
     # ── RESEARCH ──────────────────────────────────────────────────────────────
 
-    async def research_game(self, game: dict) -> dict:
+    async def research_game(self, game: dict, extra_instruction: str = "") -> dict:
         """
         Deep research on a single game using web search.
         Returns structured research data.
+        Pass extra_instruction to prepend custom context (e.g. backtest hindsight guard).
         """
         game_title = game.get("title", "")
         sport = game.get("sport", "")
@@ -39,7 +40,8 @@ class SportsIntelligence:
 
         logger.info(f"[INTEL] Researching: {game_title}")
 
-        prompt = f"""You are a sharp sports analyst researching a game for prediction markets.
+        _prefix = f"{extra_instruction.strip()}\n\n" if extra_instruction else ""
+        prompt = _prefix + f"""You are a sharp sports analyst researching a game for prediction markets.
 
 Game: {game_title}
 Sport: {sport}

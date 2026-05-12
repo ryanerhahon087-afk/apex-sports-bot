@@ -108,6 +108,18 @@ class SportsDatabase:
             manually_reset  INTEGER DEFAULT 0,
             reset_at        TEXT
         );
+
+        -- Backtest results
+        CREATE TABLE IF NOT EXISTS backtest_results (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_at              TEXT NOT NULL,
+            period_days         INTEGER NOT NULL,
+            total_slips         INTEGER DEFAULT 0,
+            winning_slips       INTEGER DEFAULT 0,
+            total_pnl           REAL DEFAULT 0,
+            ending_balance      REAL DEFAULT 0,
+            full_report_json    TEXT
+        );
         """)
         self._conn.commit()
 
@@ -377,6 +389,40 @@ class SportsDatabase:
             VALUES (?, ?, datetime('now'))
         """, (key, value))
         self._conn.commit()
+
+    # ── BACKTESTING ───────────────────────────────────────────────────────────
+
+    def save_backtest_result(self, period_days: int, report: dict) -> int:
+        cursor = self._conn.execute("""
+            INSERT INTO backtest_results
+            (run_at, period_days, total_slips, winning_slips, total_pnl,
+             ending_balance, full_report_json)
+            VALUES (datetime('now'), ?, ?, ?, ?, ?, ?)
+        """, (
+            period_days,
+            report.get("total_slips", 0),
+            report.get("winning_slips", 0),
+            report.get("total_pnl", 0),
+            report.get("ending_balance", 0),
+            json.dumps(report),
+        ))
+        self._conn.commit()
+        logger.info(f"[DB] Saved backtest result #{cursor.lastrowid} "
+                   f"({period_days}d | P&L ${report.get('total_pnl', 0):+.2f})")
+        return cursor.lastrowid
+
+    def get_latest_backtest(self) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT * FROM backtest_results ORDER BY run_at DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        try:
+            result["full_report"] = json.loads(result.get("full_report_json") or "{}")
+        except Exception:
+            result["full_report"] = {}
+        return result
 
     def close(self):
         self._conn.close()

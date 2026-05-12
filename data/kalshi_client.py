@@ -106,11 +106,12 @@ class SportsKalshiClient:
     # ── MARKET FETCHING ───────────────────────────────────────────────────────
 
     async def fetch_series_markets(self, series_ticker: str,
-                                    limit: int = 100) -> list:
-        """Fetch all open markets for a given series."""
+                                    limit: int = 100,
+                                    status: str = "open") -> list:
+        """Fetch markets for a given series (default: open; pass 'settled' for backtest)."""
         data = await self._get("/markets", {
             "series_ticker": series_ticker,
-            "status": "open",
+            "status": status,
             "limit": limit,
         })
         markets = data.get("markets", [])

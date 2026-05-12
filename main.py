@@ -1,7 +1,7 @@
 """
 APEX/SPORTS BOT — Main Entry Point
 Runs the dashboard server and slip generation scheduler.
-Build: 2026-05-11-v3
+Build: 2026-05-11-v4
 """
 import asyncio
 import json
@@ -22,6 +22,7 @@ from logs.database import SportsDatabase
 from data.kalshi_client import SportsKalshiClient
 from utils.intelligence import SportsIntelligence
 from utils.slip_generator import SlipGenerator
+from utils.backtester import BacktestEngine
 import config.config as cfg
 
 # ── LOGGING ───────────────────────────────────────────────────────────────────
@@ -60,6 +61,7 @@ cb_active = False
 cb_resume_at = None
 last_generation_date = None
 generation_running = False   # lock: prevents background + manual button from overlapping
+backtest_running   = False   # lock: one backtest at a time
 
 
 def init_bot():
@@ -277,6 +279,74 @@ def generate_now():
         return jsonify({"error": str(e), "traceback": traceback.format_exc()[-500:]}), 500
     finally:
         generation_running = False
+
+
+@app.route("/api/backtest", methods=["POST"])
+def run_backtest():
+    """Start a backtest in a background thread. Returns immediately."""
+    global backtest_running
+
+    if db is None:
+        return jsonify({"error": "Bot not initialized yet, try again in 10s"}), 503
+    if backtest_running:
+        return jsonify({"error": "Backtest already running"}), 409
+
+    data = request.get_json() or {}
+    days = min(int(data.get("days", 7)), 14)
+
+    def _run():
+        global backtest_running
+        try:
+            async def _async():
+                local_kalshi = SportsKalshiClient(
+                    api_key_id=KALSHI_API_KEY_ID,
+                    private_key_pem=KALSHI_PRIVATE_KEY,
+                    base_url=KALSHI_BASE_URL,
+                    paper_mode=PAPER_MODE,
+                )
+                await local_kalshi.connect()
+                bt = BacktestEngine(
+                    kalshi_client=local_kalshi,
+                    intelligence=intelligence,
+                    database=db,
+                    config=cfg,
+                )
+                try:
+                    return await bt.run(days)
+                finally:
+                    await local_kalshi.disconnect()
+
+            loop = asyncio.new_event_loop()
+            result = loop.run_until_complete(_async())
+            loop.close()
+            logger.info(f"[BACKTEST] Background run complete: "
+                       f"{result.get('winning_slips','?')}/{result.get('total_slips','?')} slips "
+                       f"P&L ${result.get('total_pnl', 0):+.2f}")
+        except Exception as e:
+            logger.error(f"[BACKTEST] Background run error: {e}", exc_info=True)
+        finally:
+            backtest_running = False
+
+    import threading
+    backtest_running = True
+    threading.Thread(target=_run, daemon=True).start()
+
+    return jsonify({
+        "status": "started",
+        "days": days,
+        "message": f"Running {days}-day backtest in background. "
+                   f"Poll /api/backtest/results — results appear when complete.",
+    })
+
+
+@app.route("/api/backtest/results")
+def get_backtest_results():
+    """Return the most recent saved backtest result plus running state."""
+    result = db.get_latest_backtest() if db else None
+    return jsonify({
+        "running": backtest_running,
+        "result":  result,
+    })
 
 
 @app.route("/api/pause", methods=["POST"])
@@ -536,6 +606,24 @@ body::before { content:''; position:fixed; inset:0; background:radial-gradient(e
 .gen-label { font-size:12px; color:var(--muted); }
 .gen-time { font-family:'Space Mono'; font-size:14px; color:var(--blue); }
 
+/* BACKTEST */
+.backtest-card { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:22px; }
+.bt-summary { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:20px; }
+.bt-sum-item { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:14px; text-align:center; }
+.bt-sum-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:1.5px; margin-bottom:6px; font-weight:600; }
+.bt-sum-value { font-family:'Space Mono'; font-size:22px; font-weight:700; }
+.bt-day-table { width:100%; border-collapse:collapse; font-size:13px; }
+.bt-day-table th { text-align:left; padding:8px 12px; color:var(--muted); font-size:10px; letter-spacing:1.5px; text-transform:uppercase; border-bottom:1px solid var(--border); }
+.bt-day-table td { padding:10px 12px; border-bottom:1px solid rgba(26,40,64,0.4); vertical-align:top; }
+.bt-day-table tr:last-child td { border-bottom:none; }
+.bt-win { color:var(--green); font-weight:700; font-family:'Space Mono'; }
+.bt-loss { color:var(--red); font-weight:700; font-family:'Space Mono'; }
+.bt-leg { font-size:11px; color:var(--muted); padding:2px 0; }
+.bt-leg-won { color:var(--green); }
+.bt-leg-lost { color:var(--red); }
+.bt-run-row { display:flex; align-items:center; gap:12px; }
+.bt-days-select { background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:8px 12px; color:var(--text); font-family:'DM Sans'; font-size:13px; }
+
 /* SCROLLBAR */
 ::-webkit-scrollbar { width:5px; }
 ::-webkit-scrollbar-track { background:var(--bg); }
@@ -748,6 +836,30 @@ body::before { content:''; position:fixed; inset:0; background:radial-gradient(e
         </thead>
         <tbody id="activity-tbody"></tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- BACKTESTER -->
+  <div class="backtest-card">
+    <div class="card-hdr" style="margin-bottom:18px">
+      <div class="card-title">
+        <span class="card-dot" style="background:var(--purple)"></span>
+        Strategy Backtester
+      </div>
+      <div class="bt-run-row">
+        <select id="bt-days" class="bt-days-select">
+          <option value="3">3 days</option>
+          <option value="7" selected>7 days</option>
+          <option value="14">14 days</option>
+        </select>
+        <button class="ctrl-btn" id="bt-run-btn" onclick="runBacktest()" style="border-color:var(--purple);color:var(--purple)">🔬 Run Backtest</button>
+        <span id="bt-status" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+    </div>
+    <div id="bt-results">
+      <div style="text-align:center;padding:24px;color:var(--muted);font-size:13px">
+        No backtest run yet — click Run Backtest to simulate the past week's picks
+      </div>
     </div>
   </div>
 
@@ -1306,6 +1418,143 @@ async function resetBalance() {
   fetchStatus();
 }
 
+// ── BACKTESTER ────────────────────────────────────────────────────────────────
+let btPollTimer = null;
+
+async function runBacktest() {
+  const days = parseInt(document.getElementById('bt-days').value) || 7;
+  const btn  = document.getElementById('bt-run-btn');
+  const stat = document.getElementById('bt-status');
+
+  if (!confirm(`Run a ${days}-day backtest? This will make AI calls for each settled game.`)) return;
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Starting…';
+  stat.textContent = '';
+
+  try {
+    const r = await fetch('/api/backtest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ days }),
+    });
+    const d = await r.json();
+
+    if (d.error) {
+      stat.textContent = '❌ ' + d.error;
+      btn.disabled = false;
+      btn.textContent = '🔬 Run Backtest';
+      return;
+    }
+
+    btn.textContent = '⏳ Running…';
+    stat.textContent = `${days}-day backtest running in background — results appear below (~5-15 min)`;
+    _btStartPolling();
+
+  } catch(e) {
+    stat.textContent = '❌ ' + e.message;
+    btn.disabled = false;
+    btn.textContent = '🔬 Run Backtest';
+  }
+}
+
+function _btStartPolling() {
+  if (btPollTimer) clearInterval(btPollTimer);
+  btPollTimer = setInterval(async () => {
+    try {
+      const r = await fetch('/api/backtest/results');
+      const d = await r.json();
+      if (!d.running && d.result) {
+        clearInterval(btPollTimer);
+        btPollTimer = null;
+        _renderBacktestResults(d.result);
+        document.getElementById('bt-run-btn').disabled = false;
+        document.getElementById('bt-run-btn').textContent = '🔬 Run Backtest';
+        document.getElementById('bt-status').textContent = '✅ Complete';
+      }
+    } catch(e) {}
+  }, 20000);  // poll every 20 seconds
+}
+
+function _renderBacktestResults(res) {
+  const report = res.full_report || {};
+  const days   = report.daily_breakdown || [];
+
+  const pnlColor = (report.total_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+  const pnlSign  = (report.total_pnl || 0) >= 0 ? '+' : '';
+
+  const summary = `
+    <div class="bt-summary">
+      <div class="bt-sum-item">
+        <div class="bt-sum-label">Slip Win Rate</div>
+        <div class="bt-sum-value" style="color:${(report.slip_win_rate||0)>=50?'var(--green)':'var(--red)'}">${report.slip_win_rate||0}%</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">${report.winning_slips||0}/${report.total_slips||0} slips</div>
+      </div>
+      <div class="bt-sum-item">
+        <div class="bt-sum-label">Leg Win Rate</div>
+        <div class="bt-sum-value" style="color:${(report.leg_win_rate||0)>=50?'var(--green)':'var(--gold)'}">${report.leg_win_rate||0}%</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">${report.winning_legs||0}/${report.total_legs||0} legs</div>
+      </div>
+      <div class="bt-sum-item">
+        <div class="bt-sum-label">Total P&amp;L</div>
+        <div class="bt-sum-value" style="color:${pnlColor}">${pnlSign}$${Math.abs(report.total_pnl||0).toFixed(2)}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">$100 → $${(report.ending_balance||0).toFixed(2)}</div>
+      </div>
+      <div class="bt-sum-item">
+        <div class="bt-sum-label">Period</div>
+        <div class="bt-sum-value" style="font-size:18px;color:var(--blue)">${report.period_days||'?'}d</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">${report.period||''}</div>
+      </div>
+    </div>`;
+
+  const rows = days.map(day => {
+    const legRows = (day.legs||[]).map(leg => {
+      const wonCls  = leg.won ? 'bt-leg-won' : 'bt-leg-lost';
+      const wonIcon = leg.won ? '✓' : '✗';
+      return `<div class="bt-leg ${wonCls}">${wonIcon} ${leg.pick||leg.game||''} <span style="font-family:'Space Mono'">${(leg.odds||0).toFixed(2)}x</span> → actual: ${leg.actual_result||'?'}</div>`;
+    }).join('');
+
+    const pnl     = day.pnl || 0;
+    const pnlCls  = pnl >= 0 ? 'bt-win' : 'bt-loss';
+    const pnlTxt  = (pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2);
+
+    return `<tr>
+      <td style="font-family:'Space Mono';font-size:12px;color:var(--muted)">${day.date||''}</td>
+      <td>${legRows || '<span style="color:var(--muted);font-size:11px">no legs</span>'}</td>
+      <td style="font-family:'Space Mono';font-size:12px">${(day.combined_odds||0).toFixed(2)}x</td>
+      <td style="font-family:'Space Mono';font-size:12px">$${(day.stake||0).toFixed(2)}</td>
+      <td class="${pnlCls}">${pnlTxt}</td>
+      <td style="font-family:'Space Mono';font-size:12px;color:var(--muted)">$${(day.balance_after||0).toFixed(2)}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">No daily data</td></tr>';
+
+  const runAt = report.run_at ? new Date(report.run_at).toLocaleString() : '';
+
+  document.getElementById('bt-results').innerHTML = summary + `
+    <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Run at: ${runAt}</div>
+    <div style="overflow-x:auto">
+      <table class="bt-day-table">
+        <thead><tr><th>Date</th><th>Picks</th><th>Odds</th><th>Stake</th><th>P&L</th><th>Balance</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+// Auto-load any existing backtest result on page load
+async function fetchBacktestResults() {
+  try {
+    const r = await fetch('/api/backtest/results');
+    const d = await r.json();
+    if (d.result) _renderBacktestResults(d.result);
+    if (d.running) {
+      document.getElementById('bt-run-btn').disabled = true;
+      document.getElementById('bt-run-btn').textContent = '⏳ Running…';
+      document.getElementById('bt-status').textContent = 'Backtest in progress…';
+      _btStartPolling();
+    }
+  } catch(e) {}
+}
+
 // ── HELPERS ───────────────────────────────────────────────────────────────────
 function formatTime(isoStr) {
   if (!isoStr) return '—';
@@ -1336,9 +1585,10 @@ function init() {
   fetchSlips();
   fetchRollover();
   fetchStats();
+  fetchBacktestResults();
   loadChart('1d', document.querySelector('.tog-btn.active'));
   calcRollover();
-  
+
   setInterval(fetchStatus, 10000);
   setInterval(fetchSlips, 30000);
   setInterval(fetchRollover, 30000);
