@@ -163,16 +163,22 @@ class SlipGenerator:
         return games
 
     def _series_to_sport(self, series: str) -> str:
-        if series.startswith("KXNBA"):
+        if "NCAAFB" in series:
+            return "NCAAFB"
+        elif "NCAAMB" in series:
+            return "NCAAMB"
+        elif "TENNIS" in series:
+            return "TENNIS"
+        elif "NBA" in series:
             return "NBA"
-        elif series.startswith("KXMLB"):
-            return "MLB"
-        elif series.startswith("KXNHL"):
-            return "NHL"
-        elif series.startswith("KXMLS") or series.startswith("KXSOCCER"):
-            return "SOCCER"
-        elif series.startswith("KXNFL"):
+        elif "NFL" in series:
             return "NFL"
+        elif "MLB" in series:
+            return "MLB"
+        elif "NHL" in series:
+            return "NHL"
+        elif "MLS" in series or "SOCCER" in series:
+            return "SOCCER"
         return "OTHER"
 
     def _infer_market_type(self, series: str, market: dict) -> str:

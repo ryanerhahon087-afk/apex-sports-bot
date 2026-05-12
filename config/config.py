@@ -19,22 +19,30 @@ STARTING_BALANCE    = float(os.environ.get("STARTING_BALANCE", "100.00"))
 # ── MARKET SERIES TICKERS ─────────────────────────────────────────────────────
 # These are the Kalshi series we actively scan
 ACTIVE_SERIES = [
-    "KXNBAGAME",    # NBA game winners
-    "KXNBATOTAL",   # NBA totals (over/under points)
-    "KXMLBGAME",    # MLB game winners
-    "KXMLBTOTAL",   # MLB total runs
-    "KXNHLGAME",    # NHL game winners
-    "KXNHLTOTAL",   # NHL total goals
+    # NBA
+    "KXNBAGAME",      # NBA game winners
+    "KXNBATOTAL",     # NBA totals (over/under points)
+    "KXNBATEAMTOTAL", # NBA team totals
+    # MLB
+    "KXMLBGAME",      # MLB game winners
+    "KXMLBTOTAL",     # MLB total runs
+    # NHL
+    "KXNHLGAME",      # NHL game winners
+    "KXNHLTOTAL",     # NHL total goals
+    # NFL (activates September)
+    "KXNFLGAME",      # NFL game winners
+    "KXNFLTOTAL",     # NFL totals
+    # College Football (activates August)
+    "KXNCAAFB",       # NCAAF game winners / totals
+    # College Basketball (activates November)
+    "KXNCAAMB",       # NCAAM game winners / totals
+    # Tennis (year-round Grand Slams)
+    "KXTENNIS",       # Tennis match winners
 ]
-
-# Series to add when available on Kalshi:
-# "KXNBAPLAYER"  - NBA player props
-# "KXSOCCER"     - Soccer markets
-# "KXMLS"        - MLS markets
 
 # ── SPORT PRIORITY ORDER ──────────────────────────────────────────────────────
 # Bot prioritizes sports in this order when building slips
-SPORT_PRIORITY = ["NBA", "MLB", "NHL", "SOCCER"]
+SPORT_PRIORITY = ["NBA", "NFL", "MLB", "NHL", "NCAAFB", "NCAAMB", "SOCCER", "TENNIS"]
 
 # ── SLIP CONFIGURATION ────────────────────────────────────────────────────────
 

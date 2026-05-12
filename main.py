@@ -1,6 +1,7 @@
 """
 APEX/SPORTS BOT — Main Entry Point
 Runs the dashboard server and slip generation scheduler.
+Build: 2026-05-11-v3
 """
 import asyncio
 import json
@@ -499,6 +500,9 @@ body::before { content:''; position:fixed; inset:0; background:radial-gradient(e
 .sport-pill { display:inline-flex; padding:2px 8px; border-radius:4px; font-size:10px; font-weight:700; letter-spacing:0.5px; }
 .sp-nba { background:rgba(29,66,138,0.3); color:#5b8dd9; }
 .sp-mlb { background:rgba(227,25,55,0.2); color:#ff6b7a; }
+.sp-nhl { background:rgba(0,100,200,0.2); color:#4db8ff; }
+.sp-nfl { background:rgba(1,51,105,0.3); color:#7ab3f5; }
+.sp-tennis { background:rgba(200,180,0,0.2); color:#ffe033; }
 .sp-soccer { background:rgba(0,165,80,0.2); color:#00d465; }
 
 /* MODAL */
@@ -877,15 +881,18 @@ function renderSlips(filter) {
     }
   }
   
-  // FIX 3: Sport-based icon instead of slip-type-based
   function getSlipIcon(slip) {
     const sports = (slip.sport_mix || '').toUpperCase();
     if (slip.slip_type === 'ROLLOVER') return '🔄';
     if (slip.slip_type === 'LOTTO') return '🎰';
+    if (sports.includes('NFL')) return '🏈';
+    if (sports.includes('NCAAFB')) return '🏈';
     if (sports.includes('NBA')) return '🏀';
+    if (sports.includes('NCAAMB')) return '🏀';
     if (sports.includes('MLB')) return '⚾';
-    if (sports.includes('SOCCER')) return '⚽';
     if (sports.includes('NHL')) return '🏒';
+    if (sports.includes('TENNIS')) return '🎾';
+    if (sports.includes('SOCCER')) return '⚽';
     return '📋';
   }
   const iconBg = { DAILY:'si-daily', ROLLOVER:'si-rollover', LOTTO:'si-lotto' };
@@ -902,8 +909,10 @@ function renderSlips(filter) {
     else statusBadge = '<span class="status-badge sb-lost">LOSS</span>';
     
     const sports = (s.sport_mix || '').split(',');
+    const sportPillClass = { NBA:'sp-nba', MLB:'sp-mlb', SOCCER:'sp-soccer', NHL:'sp-nhl', NFL:'sp-nfl', NCAAFB:'sp-nfl', NCAAMB:'sp-nba', TENNIS:'sp-tennis' };
     const sportPills = sports.map(sp => {
-      const cls = sp.trim() === 'NBA' ? 'sp-nba' : sp.trim() === 'MLB' ? 'sp-mlb' : 'sp-soccer';
+      const key = sp.trim().toUpperCase();
+      const cls = sportPillClass[key] || 'sp-nba';
       return `<span class="sport-pill ${cls}">${sp.trim()}</span>`;
     }).join(' ');
     
@@ -945,7 +954,7 @@ async function openSlipModal(slipId) {
   const d = await r.json();
   const legs = d.legs || [];
   
-  const sportIcon = { NBA:'🏀', MLB:'⚾', SOCCER:'⚽' };
+  const sportIcon = { NBA:'🏀', NFL:'🏈', MLB:'⚾', NHL:'🏒', NCAAFB:'🏈', NCAAMB:'🏀', TENNIS:'🎾', SOCCER:'⚽' };
   
   const legsHtml = legs.map(leg => {
     const statusClass = leg.status === 'WON' ? 'ls-won' : leg.status === 'LOST' ? 'ls-lost' : 'ls-pending';
