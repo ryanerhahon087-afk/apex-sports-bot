@@ -46,7 +46,18 @@ class SlipGenerator:
 
             # Step 2: Group markets by game and filter for today's games
             games = self._group_markets_by_game(all_markets)
-            logger.info(f"[GEN] Found {len(games)} games to analyze")
+            total_games = len(games)
+
+            # Cap research to MAX_RESEARCH_GAMES (sorted by sport priority + soonest start)
+            cap = getattr(self._config, "MAX_RESEARCH_GAMES", 20)
+            if len(games) > cap:
+                games = games[:cap]
+                logger.info(
+                    f"[GEN] Found {total_games} games — capping research at "
+                    f"{cap} (rate limit guard)"
+                )
+            else:
+                logger.info(f"[GEN] Found {len(games)} games to analyze")
 
             if not games:
                 logger.warning("[GEN] No eligible games found")
@@ -157,9 +168,12 @@ class SlipGenerator:
                 })
 
         games = list(games_dict.values())
-        # Sort by sport priority
+        # Sort by sport priority first, then by soonest game start
         priority = {s: i for i, s in enumerate(self._config.SPORT_PRIORITY)}
-        games.sort(key=lambda g: priority.get(g["sport"], 99))
+        games.sort(key=lambda g: (
+            priority.get(g["sport"], 99),
+            g.get("game_start", "9999"),
+        ))
         return games
 
     def _series_to_sport(self, series: str) -> str:

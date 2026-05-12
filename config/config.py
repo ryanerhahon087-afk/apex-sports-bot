@@ -105,6 +105,12 @@ CB_HALT_HOURS           = 24        # Pause 24 hours when triggered
 AI_MODEL                = "claude-sonnet-4-5"  # Sonnet for sports reasoning
 AI_MAX_TOKENS           = 2000
 
+# ── RESEARCH LIMITS ──────────────────────────────────────────────────────────
+# Max unique games to research per generation run.
+# At ~30k TPM and ~3k tokens/call, 20 games ≈ 2 minutes (no rate limiting).
+# Games are sorted by SPORT_PRIORITY then soonest game_start before applying cap.
+MAX_RESEARCH_GAMES      = 20
+
 # ── DASHBOARD ─────────────────────────────────────────────────────────────────
 DASHBOARD_PORT          = int(os.environ.get("PORT", "8081"))
 DASHBOARD_PASSWORD      = os.environ.get("DASHBOARD_PASSWORD", "")
