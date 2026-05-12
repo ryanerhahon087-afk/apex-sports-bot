@@ -294,12 +294,25 @@ class SlipGenerator:
                 if pick["current_odds"] < 1.20:
                     continue
 
-                # Evaluate with AI — 5s between slip-type evaluations
-                for slip_type in ["DAILY", "ROLLOVER", "LOTTO"]:
-                    evaluation = await self._intel.evaluate_pick(
-                        pick, research, slip_type
-                    )
-                    pick[f"eval_{slip_type.lower()}"] = evaluation
+                # Evaluate for DAILY first.
+                # Skip ROLLOVER/LOTTO if DAILY conf is below LOTTO threshold —
+                # saves ~60% of evaluate_pick API calls.
+                daily_eval = await self._intel.evaluate_pick(pick, research, "DAILY")
+                pick["eval_daily"] = daily_eval
+                daily_conf = float(daily_eval.get("confidence") or 0)
+
+                if daily_conf >= self._config.LOTTO_MIN_CONFIDENCE:
+                    await asyncio.sleep(5)
+                    rollover_eval = await self._intel.evaluate_pick(pick, research, "ROLLOVER")
+                    pick["eval_rollover"] = rollover_eval
+                    await asyncio.sleep(5)
+                    lotto_eval = await self._intel.evaluate_pick(pick, research, "LOTTO")
+                    pick["eval_lotto"] = lotto_eval
+                    await asyncio.sleep(5)
+                else:
+                    # Not viable for any slip type — skip 2 API calls
+                    pick["eval_rollover"] = {"include_in_slip": False, "confidence": 0}
+                    pick["eval_lotto"]    = {"include_in_slip": False, "confidence": 0}
                     await asyncio.sleep(5)
 
                 all_candidates.append(pick)
