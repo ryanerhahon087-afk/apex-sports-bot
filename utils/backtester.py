@@ -268,7 +268,32 @@ class BacktestEngine:
                 logger.warning(f"[BACKTEST] Research poor/failed: {title}")
                 continue
 
-            markets_in_game = game.get("markets", [])
+            # Apply top-3-per-type filter: for TOTAL series there can be
+            # 20+ different lines per game. We only want the 3 lines closest
+            # to the "sharp" mid-point, i.e. the lowest OVER lines (most
+            # likely to hit) per game.  For GAME_WINNER there are normally
+            # only 2 markets (one per team) so the cap has no effect there.
+            MAX_MARKETS_PER_TYPE = 3
+            markets_by_type: dict = {}
+            for m in game.get("markets", []):
+                mtype = m.get("market_type", "OTHER")
+                markets_by_type.setdefault(mtype, []).append(m)
+
+            markets_in_game = []
+            for mtype, mlist in markets_by_type.items():
+                # For TOTAL markets sort by line number ascending (lowest line
+                # = most likely to hit) and take the bottom MAX_MARKETS_PER_TYPE.
+                # For GAME_WINNER/OTHER just keep all (usually only 2).
+                if mtype == "TOTAL" and len(mlist) > MAX_MARKETS_PER_TYPE:
+                    def _parse_line(m):
+                        import re as _re
+                        sub = m.get("subtitle") or m.get("title", "")
+                        nums = _re.findall(r"\d+\.?\d*", sub)
+                        return float(nums[0]) if nums else 9999
+                    mlist.sort(key=_parse_line)   # lowest number first
+                    mlist = mlist[:MAX_MARKETS_PER_TYPE]
+                markets_in_game.extend(mlist)
+
             logger.info(
                 f"[BACKTEST] Evaluating {len(markets_in_game)} market(s) "
                 f"for: {title}"
