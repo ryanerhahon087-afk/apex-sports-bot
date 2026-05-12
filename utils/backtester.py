@@ -209,8 +209,14 @@ class BacktestEngine:
                         "markets": [],
                     }
 
-                yes_ask = float(market.get("yes_ask_dollars") or 0)
                 result  = market.get("result", "")
+
+                # Settled markets report yes_ask_dollars = 1.00 (YES won) or
+                # 0.00 (NO won) — not the pre-game probability we need.
+                # Substitute 0.50 so the market passes the "near-certain" filter
+                # and tests the AI's directional accuracy at even-money odds.
+                raw_ask = float(market.get("yes_ask_dollars") or 0)
+                yes_ask = raw_ask if 0.05 < raw_ask < 0.95 else 0.50
 
                 events[event_ticker]["markets"].append({
                     "ticker":      market.get("ticker", ""),
@@ -262,15 +268,28 @@ class BacktestEngine:
                 logger.warning(f"[BACKTEST] Research poor/failed: {title}")
                 continue
 
-            for market in game.get("markets", []):
-                yes_ask = market.get("yes_ask", 0)
-                if yes_ask <= 0.05 or yes_ask >= 0.95:
-                    continue  # skip near-certain / nearly-impossible lines
+            markets_in_game = game.get("markets", [])
+            logger.info(
+                f"[BACKTEST] Evaluating {len(markets_in_game)} market(s) "
+                f"for: {title}"
+            )
 
+            for market in markets_in_game:
+                yes_ask = market.get("yes_ask", 0)
+                # yes_ask was already normalised to 0.50 for settled markets
+                # in _group_by_date; this guard is a safety net only
+                if yes_ask <= 0.01 or yes_ask >= 0.99:
+                    logger.debug(
+                        f"[BACKTEST] Skipping market (bad yes_ask={yes_ask}): "
+                        f"{market.get('title','?')}"
+                    )
+                    continue
+
+                pick_text = market.get("subtitle") or market.get("title", "")
                 pick_dict = {
                     "game":         game.get("title", ""),
                     "market_type":  market.get("market_type", "GAME_WINNER"),
-                    "pick":         market.get("subtitle") or market.get("title", ""),
+                    "pick":         pick_text,
                     "current_odds": yes_ask,
                 }
 
@@ -279,10 +298,26 @@ class BacktestEngine:
                 )
                 await asyncio.sleep(3)
 
-                if not evaluation.get("include_in_slip"):
-                    continue
                 conf = float(evaluation.get("confidence") or 0)
-                if conf < self._config.DAILY_MIN_CONFIDENCE:
+                include = evaluation.get("include_in_slip", False)
+                logger.info(
+                    f"[BACKTEST] {pick_text[:40]} → "
+                    f"conf={conf} include={include}"
+                )
+
+                if not include:
+                    continue
+                # Use a slightly lower threshold in backtest mode since we're
+                # simulating 50/50 markets without real pre-game odds context
+                backtest_min_conf = getattr(
+                    self._config, "BACKTEST_MIN_CONFIDENCE",
+                    self._config.ROLLOVER_MIN_CONFIDENCE  # default: 7.0
+                )
+                if conf < backtest_min_conf:
+                    logger.info(
+                        f"[BACKTEST] {pick_text[:40]} below threshold "
+                        f"({conf} < {backtest_min_conf}), skipping"
+                    )
                     continue
 
                 individual_odds = round(1.0 / yes_ask, 4) if yes_ask > 0 else 1.0

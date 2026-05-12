@@ -64,6 +64,10 @@ ROLLOVER_MIN_CONFIDENCE = 7.0        # Minimum confidence per leg
 ROLLOVER_MIN_LEGS       = 2          # Minimum legs to reach target odds
 ROLLOVER_MAX_LEGS       = 4          # Maximum legs per rollover day
 
+# Backtest — slightly looser threshold because we're simulating at 50/50 odds
+# (no real pre-game price data), so the AI has less price signal to work with
+BACKTEST_MIN_CONFIDENCE = 6.5
+
 # Lotto Slip
 LOTTO_STAKE_PCT         = 0.02       # 2% of cash reserves
 LOTTO_HARD_CAP          = 50.0       # Max $50 per lotto slip
