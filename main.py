@@ -1,7 +1,7 @@
 """
 APEX/SPORTS BOT — Main Entry Point
 Runs the dashboard server and slip generation scheduler.
-Build: 2026-05-11-v4
+Build: 2026-05-12-v5
 """
 import asyncio
 import json
@@ -290,6 +290,12 @@ def run_backtest():
         return jsonify({"error": "Bot not initialized yet, try again in 10s"}), 503
     if backtest_running:
         return jsonify({"error": "Backtest already running"}), 409
+    if generation_running:
+        return jsonify({
+            "error": "Slip generation is currently running — both pipelines share the "
+                     "same AI rate limit. Wait for generation to finish, then retry.",
+            "retry_after": "~10 minutes"
+        }), 409
 
     data = request.get_json() or {}
     days = min(int(data.get("days", 7)), 14)
@@ -1642,6 +1648,19 @@ async def run_background_tasks():
         logger.error(f"[BOT] Kalshi connect failed: {e}", exc_info=True)
         # Continue anyway — generate_now() will reconnect per-request
     bot_running = True
+
+    # Prevent re-generation on redeploy: if slips already exist for today, skip
+    try:
+        today_stats = db.get_today_stats()
+        if today_stats.get("total", 0) > 0:
+            last_generation_date = datetime.now(timezone.utc).date().isoformat()
+            logger.info(
+                f"[BOT] Found {today_stats['total']} slip(s) from today in DB — "
+                f"skipping generation (last_generation_date={last_generation_date})"
+            )
+    except Exception as e:
+        logger.warning(f"[BOT] Could not check today's slips: {e}")
+
     logger.info("[BOT] Background tasks started")
 
     while True:
