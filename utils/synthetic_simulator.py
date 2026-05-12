@@ -513,138 +513,224 @@ class SyntheticSimulator:
     # ── Pipeline helpers ───────────────────────────────────────────────────────
 
     async def _research_games(self, games_for_ai: list) -> list:
-        researched = []
-        for i, game in enumerate(games_for_ai):
-            logger.info(f"[SIM] Researching: {game.get('title','?')}")
-            try:
-                research = await self._intel.research_game(game)
-                game["research"] = research
-            except Exception as e:
-                logger.warning(f"[SIM] Research failed for {game.get('title')}: {e}")
-                game["research"] = {"research_quality": 0}
-            researched.append(game)
-            if i < len(games_for_ai) - 1:
-                await asyncio.sleep(8)   # keep well under 30k TPM
-        return researched
+        """
+        Build synthetic research from generator stats — no web search needed.
+        Synthetic games don't exist on the internet so we skip the AI call and
+        instead construct the research dict from the game generator's team data.
+        """
+        for game in games_for_ai:
+            sport  = game.get("sport", "")
+            title  = game.get("title", "")
+            scenario = game.get("scenario_description", "Normal game conditions")
+            logger.info(f"[SIM] Building synthetic research: {title}")
 
-    async def _evaluate_picks(self, researched: list) -> list:
-        candidates = []
-        for game in researched:
-            research = game.get("research", {})
-            if not research.get("research_quality", 0):
-                continue
-
-            for market in game.get("markets", []):
-                yes_ask = float(market.get("yes_ask_dollars") or 0)
-                if yes_ask <= 0.05 or yes_ask >= 0.95:
-                    continue
-
-                pick = {
-                    "game":          game["title"],
-                    "sport":         game["sport"],
-                    "event_ticker":  game["event_ticker"],
-                    "market_type":   market["market_type"],
-                    "pick":          market["yes_sub_title"],
-                    "kalshi_ticker": market["ticker"],
-                    "current_odds":  round(1 / yes_ask, 4),
-                    "yes_ask":       yes_ask,
-                    "game_start":    game.get("game_date", ""),
-                    "is_synthetic":  True,
+            if sport == "NBA":
+                home_avg  = game.get("home_avg_points",  113.0)
+                away_avg  = game.get("away_avg_points",  113.0)
+                home_def  = game.get("home_avg_allowed", 111.0)
+                away_def  = game.get("away_avg_allowed", 111.0)
+                home_pace = game.get("home_pace", 97.0)
+                away_pace = game.get("away_pace", 97.0)
+                exp_total = (home_avg + away_avg + home_def + away_def) / 2
+                research = {
+                    "game":           title,
+                    "research_quality": 7.5,
+                    "injury_impact":  "low",
+                    "injuries":       [],
+                    "team1_form": (
+                        f"{game.get('home_team','Home')} avg {home_avg:.1f} pts/g "
+                        f"(def {home_def:.1f}), pace {home_pace:.1f}"
+                    ),
+                    "team2_form": (
+                        f"{game.get('away_team','Away')} avg {away_avg:.1f} pts/g "
+                        f"(def {away_def:.1f}), pace {away_pace:.1f}"
+                    ),
+                    "h2h_summary": f"Scenario: {scenario}",
+                    "situational_notes": [scenario],
+                    "expert_consensus": {
+                        "game_winner":    "unclear",
+                        "total_line":     round(exp_total),
+                        "total_direction": "OVER" if exp_total > 218 else "UNDER",
+                    },
+                    "key_factors": [
+                        f"Expected combined total ~{exp_total:.0f} pts",
+                        f"Home pace {home_pace:.1f}, Away pace {away_pace:.1f}",
+                        scenario,
+                    ],
+                    "risks": ["Pace variance", "Score distribution uncertainty"],
+                }
+            elif sport == "MLB":
+                home_scored  = game.get("home_avg_runs_scored",  4.5)
+                away_scored  = game.get("away_avg_runs_scored",  4.2)
+                home_allowed = game.get("home_avg_runs_allowed", 4.0)
+                away_allowed = game.get("away_avg_runs_allowed", 3.8)
+                exp_total = home_scored * 0.5 + away_allowed * 0.5 + \
+                            away_scored * 0.5 + home_allowed * 0.5
+                research = {
+                    "game":           title,
+                    "research_quality": 7.5,
+                    "injury_impact":  "low",
+                    "injuries":       [],
+                    "team1_form": (
+                        f"{game.get('home_team','Home')} avg {home_scored:.1f} R/g "
+                        f"(allows {home_allowed:.1f})"
+                    ),
+                    "team2_form": (
+                        f"{game.get('away_team','Away')} avg {away_scored:.1f} R/g "
+                        f"(allows {away_allowed:.1f})"
+                    ),
+                    "h2h_summary": f"Scenario: {scenario}",
+                    "situational_notes": [scenario],
+                    "expert_consensus": {
+                        "game_winner":    "unclear",
+                        "total_line":     round(exp_total, 1),
+                        "total_direction": "OVER" if exp_total > 8.5 else "UNDER",
+                    },
+                    "key_factors": [
+                        f"Expected combined total ~{exp_total:.1f} runs",
+                        scenario,
+                        "Standard pitching conditions assumed",
+                    ],
+                    "risks": ["Pitcher variance", "Weather conditions"],
+                }
+            else:
+                research = {
+                    "game": title,
+                    "research_quality": 5.0,
                 }
 
-                try:
-                    ev = await self._intel.evaluate_pick(pick, research, "DAILY")
-                except Exception as e:
-                    logger.warning(f"[SIM] Eval failed for {pick['pick']}: {e}")
-                    ev = {"include_in_slip": False, "confidence": 0}
+            game["research"] = research
 
-                conf    = float(ev.get("confidence") or 0)
-                include = ev.get("include_in_slip", False)
+        return games_for_ai
 
+    async def _evaluate_picks(self, researched: list) -> list:
+        """
+        Select candidates using market probability only — no API calls.
+        yes_ask is the synthetic market's estimate of YES winning (true_prob ± noise).
+        We select markets with yes_ask >= 0.55 (55%+ edge) and scale confidence
+        from 6.0 (at 0.55) up to 9.5 (at 0.90).
+        One candidate per game (highest yes_ask) to keep legs diversified.
+        """
+        # Threshold: pick markets where the synthetic line gives 55%+ true probability
+        MIN_YES_ASK   = 0.55   # ~1.82x odds — genuine edge
+        MAX_YES_ASK   = 0.90   # avoid near-certainties that look synthetic
+        LEGS_PER_GAME = 2      # up to 2 picks per game (best by yes_ask)
+
+        candidates = []
+        for game in researched:
+            game_picks = []
+            for market in game.get("markets", []):
+                yes_ask = float(market.get("yes_ask_dollars") or 0)
+                if yes_ask < MIN_YES_ASK or yes_ask > MAX_YES_ASK:
+                    continue
+
+                # Confidence: linear map from 0.55→6.0 to 0.90→9.5
+                conf = 6.0 + (yes_ask - 0.55) / (0.90 - 0.55) * (9.5 - 6.0)
+                conf = round(conf, 1)
+                indiv_odds = round(1.0 / yes_ask, 4)
+
+                game_picks.append({
+                    "game":            game["title"],
+                    "sport":           game["sport"],
+                    "event_ticker":    game["event_ticker"],
+                    "market_type":     market["market_type"],
+                    "pick":            market["yes_sub_title"],
+                    "calibrated_pick": market["yes_sub_title"],
+                    "kalshi_ticker":   market["ticker"],
+                    "yes_ask":         yes_ask,
+                    "individual_odds": indiv_odds,
+                    "confidence":      conf,
+                    "game_start":      game.get("game_date", ""),
+                    "is_synthetic":    True,
+                })
                 logger.info(
-                    f"[SIM] {pick['pick'][:40]} → "
-                    f"conf={conf} include={include}"
+                    f"[SIM] Candidate: {market['yes_sub_title'][:40]} "
+                    f"yes_ask={yes_ask:.2f} conf={conf}"
                 )
 
-                if include and conf >= 6.5:
-                    pick["eval_daily"]    = ev
-                    pick["confidence"]    = conf
-                    pick["calibrated_pick"] = ev.get("calibrated_pick") or pick["pick"]
-                    candidates.append(pick)
-
-                await asyncio.sleep(4)
+            # Take top LEGS_PER_GAME by yes_ask
+            game_picks.sort(key=lambda x: x["yes_ask"], reverse=True)
+            candidates.extend(game_picks[:LEGS_PER_GAME])
 
         return candidates
 
+    def _select_legs(
+        self,
+        candidates: list,
+        min_legs:   int,
+        max_legs:   int,
+        target_odds: float,
+    ) -> list:
+        """
+        Greedily pick up to max_legs candidates (highest confidence first)
+        whose combined odds are at least target_odds.
+        Returns the selected leg list, or [] if min_legs can't be met.
+        """
+        sorted_c = sorted(candidates, key=lambda x: x["confidence"], reverse=True)
+        selected = []
+        combined = 1.0
+        for c in sorted_c:
+            if len(selected) >= max_legs:
+                break
+            selected.append(c)
+            combined *= c["individual_odds"]
+            if len(selected) >= min_legs and combined >= target_odds:
+                break
+
+        if len(selected) < min_legs:
+            return []
+
+        return selected
+
     async def _build_slip(
         self,
-        candidates:  list,
+        candidates:   list,
         true_results: dict,
-        balance:     float,
-        slip_type:   str,
-        target_odds: float,
-        min_legs:    int,
-        max_legs:    int,
-        stake_pct:   float  = 0.10,
-        fixed_stake: float  = None,
+        balance:      float,
+        slip_type:    str,
+        target_odds:  float,
+        min_legs:     int,
+        max_legs:     int,
+        stake_pct:    float = 0.10,
+        fixed_stake:  float = None,
     ) -> dict | None:
-        leg_dicts = [{
-            "game":            c["game"],
-            "sport":           c["sport"],
-            "market_type":     c["market_type"],
-            "pick":            c.get("calibrated_pick", c["pick"]),
-            "kalshi_ticker":   c["kalshi_ticker"],
-            "individual_odds": round(1 / c["yes_ask"], 4),
-            "confidence":      c["confidence"],
-            "ai_reasoning":    c.get("eval_daily", {}).get("reasoning", ""),
-            "game_start":      c.get("game_start", ""),
-        } for c in candidates]
-
-        try:
-            slip_data = await self._intel.assemble_slip(
-                candidates=leg_dicts,
-                slip_type=slip_type,
-                target_odds=target_odds,
-                min_legs=min_legs,
-                max_legs=max_legs,
+        """
+        Build a slip by direct leg selection (no AI assemble call).
+        Scores each leg against the pre-revealed true results.
+        """
+        legs_chosen = self._select_legs(candidates, min_legs, max_legs, target_odds)
+        if not legs_chosen:
+            logger.info(
+                f"[SIM] {slip_type}: not enough legs "
+                f"({len(candidates)} candidates, need ≥{min_legs})"
             )
-        except Exception as e:
-            logger.warning(f"[SIM] Assemble failed ({slip_type}): {e}")
             return None
 
-        if not slip_data or not slip_data.get("selected_legs"):
-            return None
-
-        combined_odds = float(slip_data.get("combined_odds") or 0)
-        if combined_odds <= 0:
-            combined_odds = 1.0
-            for leg in slip_data["selected_legs"]:
-                lo = float(leg.get("individual_odds") or 0)
-                if lo > 0:
-                    combined_odds *= lo
-            combined_odds = round(combined_odds, 4)
+        combined_odds = 1.0
+        for leg in legs_chosen:
+            combined_odds *= leg["individual_odds"]
+        combined_odds = round(combined_odds, 4)
 
         stake = (
             fixed_stake if fixed_stake is not None
             else round(min(balance * stake_pct, 10_000.0), 2)
         )
 
-        # Score each leg
         legs_out = []
         all_won  = True
-        for leg in slip_data["selected_legs"]:
-            ticker = leg.get("kalshi_ticker") or leg.get("ticker", "")
+        for leg in legs_chosen:
+            ticker = leg.get("kalshi_ticker", "")
             won    = bool(true_results.get(ticker, False))
             if not won:
                 all_won = False
             legs_out.append({
-                "game":          leg.get("game", ""),
-                "pick":          leg.get("pick", ""),
-                "ticker":        ticker,
-                "odds":          round(float(leg.get("individual_odds") or 0), 3),
-                "confidence":    round(float(leg.get("confidence") or 0), 1),
-                "won":           won,
-                "result":        "WON" if won else "LOST",
+                "game":       leg["game"],
+                "pick":       leg["calibrated_pick"],
+                "ticker":     ticker,
+                "odds":       round(leg["individual_odds"], 3),
+                "confidence": leg["confidence"],
+                "won":        won,
+                "result":     "WON" if won else "LOST",
             })
 
         pnl = (
@@ -660,15 +746,15 @@ class SyntheticSimulator:
         )
 
         return {
-            "won":           all_won,
-            "result":        "WON" if all_won else "LOST",
-            "legs":          legs_out,
-            "leg_count":     len(legs_out),
-            "combined_odds": combined_odds,
-            "stake":         stake,
-            "pnl":           pnl,
+            "won":              all_won,
+            "result":           "WON" if all_won else "LOST",
+            "slip_type":        slip_type,
+            "legs":             legs_out,
+            "leg_count":        len(legs_out),
+            "combined_odds":    combined_odds,
+            "stake":            stake,
+            "pnl":              pnl,
             "potential_payout": round(stake * combined_odds, 2),
-            "confidence":    slip_data.get("overall_confidence", 0),
         }
 
     # ── Utility ────────────────────────────────────────────────────────────────
