@@ -78,7 +78,17 @@ class PicksEngine:
 
                 for m in data.get("markets", []):
                     yes_ask = float(m.get("yes_ask_dollars") or 0)
-                    if yes_ask < 0.10 or yes_ask > 0.90:
+                    if yes_ask < 0.40 or yes_ask > 0.87:
+                        continue
+
+                    # Filter out individual team total markets (hallucinated by AI)
+                    pick_text  = (m.get("yes_sub_title") or "").lower()
+                    title_text = (m.get("title") or "").lower()
+                    skip_keywords = [
+                        "team total", "to score over", "score more than",
+                        "points by", "runs by", "goals by",
+                    ]
+                    if any(kw in pick_text or kw in title_text for kw in skip_keywords):
                         continue
 
                     ticker = m.get("ticker", "")
@@ -166,6 +176,15 @@ Together they multiply to {target_odds}x combined odds.
 Think: 5 near-certain picks at 1.25x each = 3.05x combined.
 That's far better than 2 risky picks at 1.73x each = 3.0x combined.
 The first wins ~70% of the time, the second only ~40%.
+
+IMPORTANT: Only Kalshi market types that actually exist:
+1. GAME_WINNER - Will [team] win? YES/NO
+2. TOTAL - Will BOTH teams combined score over X?
+3. PLAYER_PROP - Will [player] achieve X stat? (if available)
+
+DO NOT pick individual team scoring totals.
+DO NOT pick markets with odds below 1.15x (too certain, bad value).
+DO NOT pick markets with odds above 2.5x per single leg (too risky).
 
 PICK SELECTION RULES:
 1. Use {min_legs}-{max_legs} legs — NEVER fewer than {min_legs}
