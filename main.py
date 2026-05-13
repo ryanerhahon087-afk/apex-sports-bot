@@ -1,14 +1,11 @@
 """
 APEX/SPORTS BOT — Main Entry Point
-Runs the dashboard server and slip generation scheduler.
-Build: 2026-05-12-v12
+Build: 2026-05-12-v13
 """
 import asyncio
-import json
 import logging
 import os
 import sys
-import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -20,11 +17,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config.config import *
 from logs.database import SportsDatabase
 from data.kalshi_client import SportsKalshiClient
-from utils.intelligence import SportsIntelligence
-from utils.slip_generator import SlipGenerator
-from utils.backtester import BacktestEngine
-from utils.synthetic_simulator import SyntheticSimulator
-import config.config as cfg
 
 # ── LOGGING ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -41,7 +33,6 @@ CORS(app)
 
 @app.errorhandler(Exception)
 def handle_any_exception(e):
-    """Catch-all: return JSON instead of Flask's default HTML 500 page."""
     import traceback as tb
     logger.error(f"[FLASK] Unhandled exception: {e}", exc_info=True)
     return jsonify({
@@ -51,49 +42,23 @@ def handle_any_exception(e):
     }), 500
 
 
-# ── GLOBAL BOT STATE ──────────────────────────────────────────────────────────
+# ── GLOBAL STATE ──────────────────────────────────────────────────────────────
 db: Optional[SportsDatabase] = None
 kalshi: Optional[SportsKalshiClient] = None
-intelligence: Optional[SportsIntelligence] = None
-generator: Optional[SlipGenerator] = None
 bot_running = False
-bot_paused = False
-cb_active = False
-cb_resume_at = None
-last_generation_date = None
-generation_running = False   # lock: prevents background + manual button from overlapping
-backtest_running   = False   # lock: one backtest at a time
-simulation_running = False   # lock: one simulation at a time
-latest_sim_result  = None    # in-memory store for latest simulation result
+bot_paused  = False
 
 
 def init_bot():
-    """Initialize all bot components."""
-    global db, kalshi, intelligence, generator
-
+    global db, kalshi
     db = SportsDatabase(DB_PATH)
-
     kalshi = SportsKalshiClient(
         api_key_id=KALSHI_API_KEY_ID,
         private_key_pem=KALSHI_PRIVATE_KEY,
         base_url=KALSHI_BASE_URL,
         paper_mode=PAPER_MODE,
     )
-
-    intelligence = SportsIntelligence(
-        api_key=ANTHROPIC_API_KEY,
-        model=AI_MODEL,
-    )
-
-    generator = SlipGenerator(
-        kalshi_client=kalshi,
-        intelligence=intelligence,
-        database=db,
-        config=cfg,
-    )
-
-    logger.info(f"[BOT] Sports bot initialized | "
-               f"paper={'YES' if PAPER_MODE else 'NO'}")
+    logger.info(f"[BOT] Initialized | paper={'YES' if PAPER_MODE else 'NO'}")
 
 
 # ── API ENDPOINTS ─────────────────────────────────────────────────────────────
@@ -105,32 +70,26 @@ def health():
 
 @app.route("/api/status")
 def status():
-    global bot_paused, cb_active, cb_resume_at
-
-    balance = db.get_balance() if db else STARTING_BALANCE
-    today_stats = db.get_today_stats() if db else {}
-    all_stats = db.get_stats() if db else {}
-
+    balance    = db.get_balance()    if db else STARTING_BALANCE
+    today      = db.get_today_stats() if db else {}
+    all_stats  = db.get_stats()      if db else {}
     total = all_stats.get("total", 0)
-    wins = all_stats.get("wins", 0)
-    win_rate = wins / total if total > 0 else 0
-
+    wins  = all_stats.get("wins",  0)
     return jsonify({
-        "balance": balance,
-        "paper_mode": PAPER_MODE,
-        "bot_running": bot_running,
-        "bot_paused": bot_paused,
-        "cb_active": cb_active,
-        "cb_resume_at": cb_resume_at,
-        "today_pnl": today_stats.get("pnl", 0),
-        "today_slips": today_stats.get("total", 0),
-        "all_time_pnl": all_stats.get("total_pnl", 0),
+        "balance":        balance,
+        "paper_mode":     PAPER_MODE,
+        "bot_running":    bot_running,
+        "bot_paused":     bot_paused,
+        "cb_active":      False,
+        "today_pnl":      today.get("pnl", 0),
+        "today_slips":    today.get("total", 0),
+        "all_time_pnl":   all_stats.get("total_pnl", 0),
         "all_time_slips": total,
-        "win_rate": round(win_rate, 4),
-        "wins": wins,
-        "losses": all_stats.get("losses", 0),
+        "win_rate":       round(wins / total, 4) if total else 0,
+        "wins":           wins,
+        "losses":         all_stats.get("losses", 0),
         "next_generation": _next_generation_time(),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp":      datetime.now(timezone.utc).isoformat(),
     })
 
 
@@ -147,18 +106,6 @@ def get_slip_legs(slip_id):
     return jsonify({"legs": legs})
 
 
-@app.route("/api/rollover/active")
-def get_active_rollover():
-    rollover = db.get_active_rollover() if db else None
-    return jsonify({"rollover": rollover})
-
-
-@app.route("/api/rollover/history")
-def get_rollover_history():
-    history = db.get_rollover_history(10) if db else []
-    return jsonify({"history": history})
-
-
 @app.route("/api/portfolio")
 def get_portfolio():
     days = int(request.args.get("days", 30))
@@ -168,319 +115,143 @@ def get_portfolio():
 
 @app.route("/api/stats")
 def get_stats():
-    all_stats = db.get_stats() if db else {}
-    today_stats = db.get_today_stats() if db else {}
-    cb_history = db.get_cb_history(4) if db else []
     return jsonify({
-        "all_time": all_stats,
-        "today": today_stats,
-        "circuit_breaker_history": cb_history,
+        "all_time":               db.get_stats()      if db else {},
+        "today":                  db.get_today_stats() if db else {},
+        "circuit_breaker_history": db.get_cb_history(4) if db else [],
     })
 
+
+# ── Stub endpoints so dashboard JS doesn't throw hard errors ──────────────────
+
+@app.route("/api/rollover/active")
+def get_active_rollover():
+    return jsonify({"rollover": None})
+
+@app.route("/api/rollover/history")
+def get_rollover_history():
+    return jsonify({"history": []})
 
 @app.route("/api/rollover/calculate", methods=["POST"])
 def calculate_rollover():
-    """Calculate rollover projections without placing any bets."""
-    data = request.get_json() or {}
-    days = int(data.get("days", 5))
-    odds = float(data.get("odds_per_day", 3.0))
-    stake = float(data.get("starting_stake", 10.0))
-
-    result = intelligence.calculate_rollover(days, odds, stake)
-    return jsonify(result)
-
+    return jsonify({"valid": False, "errors": ["Rollover feature removed"]})
 
 @app.route("/api/rollover/start", methods=["POST"])
 def start_rollover():
-    """Start a manual rollover from the calculator."""
-    data = request.get_json() or {}
-    days = int(data.get("days", 5))
-    odds = float(data.get("odds_per_day", 3.0))
-    stake = float(data.get("starting_stake", 10.0))
-
-    # Validate first
-    validation = intelligence.calculate_rollover(days, odds, stake)
-    if not validation.get("valid"):
-        return jsonify({"error": validation.get("errors", ["Invalid rollover"])}), 400
-
-    # Check if there's already an active rollover
-    existing = db.get_active_rollover()
-    if existing:
-        return jsonify({
-            "error": "There is already an active rollover. "
-                    "Complete or cancel it first."
-        }), 400
-
-    # Check balance
-    balance = db.get_balance()
-    if stake > balance:
-        return jsonify({"error": f"Insufficient balance. Have ${balance:.2f}, need ${stake:.2f}"}), 400
-
-    rollover_id = db.create_rollover(
-        target_odds=odds,
-        target_days=days,
-        starting_stake=stake,
-        source="MANUAL",
-    )
-
-    return jsonify({
-        "success": True,
-        "rollover_id": rollover_id,
-        "message": f"Rollover started. First slip will be generated tonight.",
-        "projection": validation,
-    })
-
-
-@app.route("/api/generate", methods=["POST"])
-def generate_now():
-    """Manually trigger slip generation."""
-    global generation_running
-
-    if bot_paused:
-        return jsonify({"error": "Bot is paused"}), 400
-
-    if kalshi is None or generator is None:
-        return jsonify({"error": "Bot not initialized yet, try again in 10 seconds"}), 503
-
-    if generation_running:
-        return jsonify({"error": "Generation already in progress, please wait"}), 409
-
-    try:
-        generation_running = True
-        async def _run():
-            # Create a FRESH client + generator for this request's own event loop.
-            # Never touch the global kalshi/_session — it belongs to the background
-            # thread's loop and mixing loops causes "Event loop is closed" errors.
-            local_kalshi = SportsKalshiClient(
-                api_key_id=KALSHI_API_KEY_ID,
-                private_key_pem=KALSHI_PRIVATE_KEY,
-                base_url=KALSHI_BASE_URL,
-                paper_mode=PAPER_MODE,
-            )
-            await local_kalshi.connect()
-            local_gen = SlipGenerator(
-                kalshi_client=local_kalshi,
-                intelligence=intelligence,
-                database=db,
-                config=cfg,
-            )
-            try:
-                result = await local_gen.generate_all_slips()
-            finally:
-                await local_kalshi.disconnect()
-            return result
-
-        loop = asyncio.new_event_loop()
-        # Do NOT call asyncio.set_event_loop(loop) — would replace the global
-        # event loop reference, potentially confusing the background thread.
-        result = loop.run_until_complete(_run())
-        loop.close()
-        return jsonify({"success": True, "result": result})
-    except Exception as e:
-        import traceback
-        logger.error(f"[GEN] Generate endpoint error: {e}", exc_info=True)
-        return jsonify({"error": str(e), "traceback": traceback.format_exc()[-500:]}), 500
-    finally:
-        generation_running = False
-
+    return jsonify({"error": "Rollover feature removed"}), 410
 
 @app.route("/api/backtest", methods=["POST"])
 def run_backtest():
-    """Start a backtest in a background thread. Returns immediately."""
-    global backtest_running
-
-    if db is None:
-        return jsonify({"error": "Bot not initialized yet, try again in 10s"}), 503
-    if backtest_running:
-        return jsonify({"error": "Backtest already running"}), 409
-    if generation_running:
-        return jsonify({
-            "error": "Slip generation is currently running — both pipelines share the "
-                     "same AI rate limit. Wait for generation to finish, then retry.",
-            "retry_after": "~10 minutes"
-        }), 409
-
-    data = request.get_json() or {}
-    days = min(int(data.get("days", 7)), 14)
-
-    def _run():
-        global backtest_running
-        try:
-            async def _async():
-                local_kalshi = SportsKalshiClient(
-                    api_key_id=KALSHI_API_KEY_ID,
-                    private_key_pem=KALSHI_PRIVATE_KEY,
-                    base_url=KALSHI_BASE_URL,
-                    paper_mode=PAPER_MODE,
-                )
-                await local_kalshi.connect()
-                bt = BacktestEngine(
-                    kalshi_client=local_kalshi,
-                    intelligence=intelligence,
-                    database=db,
-                    config=cfg,
-                )
-                try:
-                    return await bt.run(days)
-                finally:
-                    await local_kalshi.disconnect()
-
-            loop = asyncio.new_event_loop()
-            result = loop.run_until_complete(_async())
-            loop.close()
-            logger.info(f"[BACKTEST] Background run complete: "
-                       f"{result.get('winning_slips','?')}/{result.get('total_slips','?')} slips "
-                       f"P&L ${result.get('total_pnl', 0):+.2f}")
-        except Exception as e:
-            logger.error(f"[BACKTEST] Background run error: {e}", exc_info=True)
-        finally:
-            backtest_running = False
-
-    import threading
-    backtest_running = True
-    threading.Thread(target=_run, daemon=True).start()
-
-    return jsonify({
-        "status": "started",
-        "days": days,
-        "message": f"Running {days}-day backtest in background. "
-                   f"Poll /api/backtest/results — results appear when complete.",
-    })
-
+    return jsonify({"error": "Backtester removed in v13"}), 410
 
 @app.route("/api/backtest/results")
 def get_backtest_results():
-    """Return the most recent saved backtest result plus running state."""
-    result = db.get_latest_backtest() if db else None
-    return jsonify({
-        "running": backtest_running,
-        "result":  result,
-    })
-
+    return jsonify({"running": False, "result": None})
 
 @app.route("/api/simulate", methods=["POST"])
 def run_simulate():
-    """Launch a synthetic simulation in a background thread."""
-    global simulation_running, latest_sim_result
-    if simulation_running:
-        return jsonify({"error": "Simulation already running — poll /api/simulate/results"}), 409
-
-    data = request.get_json(silent=True) or {}
-    days       = int(data.get("days", 10))
-    difficulty = data.get("difficulty", "mixed")
-    starting   = float(data.get("starting_balance", 100.0))
-
-    days = min(max(days, 1), 30)
-
-    import threading
-
-    def _run():
-        global simulation_running, latest_sim_result
-        try:
-            sim = SyntheticSimulator(intelligence=intelligence, database=db)
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(
-                sim.run_simulation(days=days, starting_balance=starting, difficulty=difficulty)
-            )
-            loop.close()
-            latest_sim_result = {
-                "days":             days,
-                "difficulty":       difficulty,
-                "starting_balance": starting,
-                "run_at":           datetime.now(timezone.utc).isoformat(),
-                "report":           result,
-            }
-            logger.info(f"[SIM] Complete — {days}d {difficulty}")
-        except Exception as exc:
-            logger.error(f"[SIM] Error: {exc}", exc_info=True)
-            latest_sim_result = {"error": str(exc)}
-        finally:
-            simulation_running = False
-
-    simulation_running = True
-    threading.Thread(target=_run, daemon=True).start()
-
-    return jsonify({
-        "status":  "started",
-        "days":    days,
-        "difficulty": difficulty,
-        "message": f"Running {days}-day {difficulty} simulation in background. "
-                   f"Poll /api/simulate/results for completion.",
-    })
-
+    return jsonify({"error": "Simulator removed in v13"}), 410
 
 @app.route("/api/simulate/results")
 def get_simulate_results():
-    """Return the latest simulation result plus running state."""
-    return jsonify({
-        "running": simulation_running,
-        "result":  latest_sim_result,
-    })
+    return jsonify({"running": False, "result": None})
+
+
+# ── PICKS GENERATION ──────────────────────────────────────────────────────────
+
+@app.route("/api/generate", methods=["POST"])
+def generate_picks():
+    if kalshi is None:
+        return jsonify({"error": "Bot not ready yet — try again in 10s"}), 503
+
+    try:
+        from utils.picks_engine import PicksEngine
+        engine  = PicksEngine(ANTHROPIC_API_KEY, kalshi)
+        balance = db.get_balance() if db else STARTING_BALANCE
+
+        async def _run():
+            if not kalshi._session:
+                await kalshi.connect()
+            return await engine.generate_picks(balance)
+
+        loop   = asyncio.new_event_loop()
+        result = loop.run_until_complete(_run())
+        loop.close()
+
+        if result.get("error"):
+            return jsonify({"error": result["error"]}), 500
+
+        if result.get("legs") and db:
+            slip_id = db.save_slip(
+                slip={
+                    "slip_type":       "DAILY",
+                    "sport_mix":       ",".join(sorted(set(
+                        _infer_sport(l["ticker"]) for l in result["legs"]
+                    ))),
+                    "combined_odds":   result["combined_odds"],
+                    "stake":           result["stake"],
+                    "potential_payout": result["potential_payout"],
+                    "confidence":      result["overall_confidence"],
+                    "projected_finish": max(
+                        (l.get("game_time", "") for l in result["legs"]),
+                        default="",
+                    ),
+                },
+                legs=[{
+                    "sport":          _infer_sport(l["ticker"]),
+                    "game":           l["game"],
+                    "market_type":    "TOTAL" if "TOTAL" in l["ticker"] else "GAME_WINNER",
+                    "pick":           l["pick"],
+                    "original_line":  l["pick"],
+                    "calibrated_line": l["pick"],
+                    "kalshi_ticker":  l["ticker"],
+                    "individual_odds": l["odds"],
+                    "confidence":     l["confidence"],
+                    "ai_reasoning":   l["reasoning"],
+                    "game_start":     l.get("game_time", ""),
+                } for l in result["legs"]],
+            )
+            result["slip_id"] = slip_id
+
+        return jsonify({"success": True, "slip": result})
+
+    except Exception as e:
+        logger.error(f"[GEN] Generate error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/picks/today")
 def todays_picks():
-    """Today's generated slips formatted for manual Kalshi execution."""
     if not db:
-        return jsonify({"date": datetime.now(timezone.utc).date().isoformat(), "picks": []})
-
+        return jsonify({"date": datetime.now(timezone.utc).date().isoformat(), "slips": []})
     today = datetime.now(timezone.utc).date().isoformat()
-    slips = db.get_recent_slips(20)
+    slips = db.get_recent_slips(10)
     today_slips = [s for s in slips if (s.get("created_at") or "")[:10] == today]
-
     result = []
     for slip in today_slips:
         legs = db.get_slip_legs(slip["id"])
         result.append({
-            "id": slip["id"],
-            "slip_type": slip["slip_type"],
-            "sport_mix": slip["sport_mix"],
-            "combined_odds": slip["combined_odds"],
-            "confidence": slip["confidence"],
-            "stake_suggestion": slip["stake"],
+            "slip_id":        slip["id"],
+            "slip_type":      slip["slip_type"],
+            "combined_odds":  slip["combined_odds"],
+            "confidence":     slip["confidence"],
+            "stake":          slip["stake"],
             "potential_payout": slip["potential_payout"],
-            "status": slip["status"],
-            "created_at": slip["created_at"],
-            "legs": [{
-                "sport": leg["sport"],
-                "game": leg["game"],
-                "pick": leg["pick"],
-                "original_line": leg["original_line"],
-                "calibrated_line": leg["calibrated_line"],
-                "confidence": leg["confidence"],
-                "odds": leg["individual_odds"],
-                "reasoning": leg["ai_reasoning"],
-                "kalshi_ticker": leg["kalshi_ticker"],
-                "kalshi_search": (leg["game"].split(" at ")[-1]
-                                  if " at " in (leg["game"] or "")
-                                  else leg["game"] or ""),
-            } for leg in legs],
+            "status":         slip["status"],
+            "legs":           legs,
         })
-
-    return jsonify({
-        "date": today,
-        "picks": result,
-        "total_slips": len(result),
-    })
+    return jsonify({"date": today, "slips": result})
 
 
 @app.route("/api/pause", methods=["POST"])
 def toggle_pause():
     global bot_paused
     bot_paused = not bot_paused
-    db.set_state("bot_paused", str(bot_paused))
     return jsonify({"paused": bot_paused})
 
 
 @app.route("/api/reset-circuit-breaker", methods=["POST"])
 def reset_cb():
-    global cb_active, cb_resume_at
-    cb_active = False
-    cb_resume_at = None
-    db.mark_cb_reset(manually=True)
-    db.set_state("cb_active", "false")
-    logger.info("[CB] Circuit breaker manually reset")
     return jsonify({"success": True})
 
 
@@ -2119,34 +1890,34 @@ window.addEventListener('load', init);
 </html>"""
 
 
-# ── HELPER FUNCTIONS ──────────────────────────────────────────────────────────
+# ── HELPERS ───────────────────────────────────────────────────────────────────
+
+def _infer_sport(ticker: str) -> str:
+    t = ticker.upper()
+    if "NBA" in t: return "NBA"
+    if "MLB" in t: return "MLB"
+    if "NHL" in t: return "NHL"
+    if "NFL" in t: return "NFL"
+    return "OTHER"
+
 
 def _next_generation_time() -> str:
-    """Calculate next scheduled generation time."""
     now = datetime.now(timezone.utc)
-    # Convert to Eastern Time (UTC-4 in EDT)
     eastern_hour = (now.hour - 4) % 24
-    
     if GENERATION_HOUR_START <= eastern_hour < GENERATION_HOUR_END:
-        return "Now (generation window open)"
-    
-    # Calculate hours until next window
-    if eastern_hour < GENERATION_HOUR_START:
-        hours_until = GENERATION_HOUR_START - eastern_hour
-    else:
-        hours_until = 24 - eastern_hour + GENERATION_HOUR_START
-    
-    next_time = now + timedelta(hours=hours_until)
-    return next_time.strftime("%H:%M UTC")
+        return "Now (window open — click Generate Picks)"
+    hours_until = (
+        GENERATION_HOUR_START - eastern_hour
+        if eastern_hour < GENERATION_HOUR_START
+        else 24 - eastern_hour + GENERATION_HOUR_START
+    )
+    return (now + timedelta(hours=hours_until)).strftime("%H:%M UTC")
 
 
-# ── MAIN ──────────────────────────────────────────────────────────────────────
+# ── BACKGROUND LOOP ───────────────────────────────────────────────────────────
 
 async def run_background_tasks():
-    """Background loop: initialize bot, check pending slips, run scheduled generation."""
-    global bot_running, last_generation_date, generation_running
-
-    # Init bot here so Flask can start first and pass the healthcheck
+    global bot_running
     try:
         init_bot()
     except Exception as e:
@@ -2155,68 +1926,26 @@ async def run_background_tasks():
 
     try:
         await kalshi.connect()
-        logger.info("[BOT] Kalshi client connected successfully")
+        logger.info("[BOT] Kalshi client connected")
     except Exception as e:
         logger.error(f"[BOT] Kalshi connect failed: {e}", exc_info=True)
-        # Continue anyway — generate_now() will reconnect per-request
+
     bot_running = True
-
-    # Prevent re-generation on redeploy: if slips already exist for today, skip
-    try:
-        today_stats = db.get_today_stats()
-        if today_stats.get("total", 0) > 0:
-            last_generation_date = datetime.now(timezone.utc).date().isoformat()
-            logger.info(
-                f"[BOT] Found {today_stats['total']} slip(s) from today in DB — "
-                f"skipping generation (last_generation_date={last_generation_date})"
-            )
-    except Exception as e:
-        logger.warning(f"[BOT] Could not check today's slips: {e}")
-
-    logger.info("[BOT] Background tasks started")
+    logger.info("[BOT] Ready — use Generate Picks button to create a slip")
 
     while True:
-        try:
-            # Check pending slips every 5 minutes
-            await generator.check_pending_slips()
-
-            # Check if it's generation time (10 AM - 12 PM Eastern)
-            now = datetime.now(timezone.utc)
-            eastern_hour = (now.hour - 4) % 24
-            today = now.date().isoformat()
-
-            if (GENERATION_HOUR_START <= eastern_hour < GENERATION_HOUR_END
-                    and today != last_generation_date
-                    and not bot_paused
-                    and not cb_active
-                    and not generation_running):
-                generation_running = True
-                try:
-                    logger.info("[BOT] Generation window open — starting slip generation")
-                    await generator.generate_all_slips()
-                    last_generation_date = today
-                finally:
-                    generation_running = False
-
-            await asyncio.sleep(300)  # Check every 5 minutes
-
-        except Exception as e:
-            logger.error(f"[BOT] Background error: {e}", exc_info=True)
-            await asyncio.sleep(60)
+        await asyncio.sleep(300)
 
 
 def main():
-    """Start the sports bot."""
     import pathlib
-    # Ensure storage directory exists before anything else
     pathlib.Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 
     logger.info("=" * 60)
-    logger.info("  APEX/SPORTS BOT — STARTING")
+    logger.info("  APEX/SPORTS BOT v13 — STARTING")
     logger.info(f"  Paper mode: {PAPER_MODE}")
     logger.info(f"  DB path: {DB_PATH}")
     logger.info(f"  Port: {DASHBOARD_PORT}")
-    logger.info(f"  Generation window: {GENERATION_HOUR_START}:00-{GENERATION_HOUR_END}:00 Eastern")
     logger.info("=" * 60)
 
     # NOTE: init_bot() is called inside the background thread so Flask can
