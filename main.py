@@ -170,8 +170,13 @@ def generate_picks():
         balance = db.get_balance() if db else STARTING_BALANCE
 
         async def _run():
-            if not kalshi._session:
-                await kalshi.connect()
+            # Always create a fresh aiohttp session in this event loop.
+            # Reusing a session from a different loop causes "Timeout context
+            # manager should be used inside a task".
+            if kalshi._session:
+                await kalshi._session.close()
+                kalshi._session = None
+            await kalshi.connect()
             return await engine.generate_all_slips(balance)
 
         loop = asyncio.new_event_loop()
