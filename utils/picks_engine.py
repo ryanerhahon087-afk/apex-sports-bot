@@ -1,6 +1,7 @@
 """
-APEX/SPORTS — Picks Engine
-One job: find good Kalshi sports picks and build a combo slip.
+APEX/SPORTS - Picks Engine
+Builds 3 daily slips: 2x odds, 3x odds, 5x odds
+Uses all available Kalshi markets across NBA/MLB/NHL
 """
 import asyncio
 import json
@@ -12,14 +13,21 @@ import anthropic
 
 logger = logging.getLogger(__name__)
 
-SERIES = [
-    "KXNBAGAME",
-    "KXNBATOTAL",
-    "KXMLBGAME",
-    "KXMLBTOTAL",
-    "KXNHLGAME",
-    "KXNHLTOTAL",
-]
+SERIES_TO_SPORT = {
+    "KXNBAGAME":     "NBA",
+    "KXNBATOTAL":    "NBA",
+    "KXNBATEAMTOTAL":"NBA",
+    "KXNBAPLAYER":   "NBA",
+    "KXMLBGAME":     "MLB",
+    "KXMLBTOTAL":    "MLB",
+    "KXMLBRFI":      "MLB",
+    "KXNHLGAME":     "NHL",
+    "KXNHLTOTAL":    "NHL",
+    "KXNFLGAME":     "NFL",
+    "KXNFLTOTAL":    "NFL",
+}
+
+ALL_SERIES = list(SERIES_TO_SPORT.keys())
 
 
 class PicksEngine:
@@ -28,117 +36,181 @@ class PicksEngine:
         self._anthropic = anthropic.Anthropic(api_key=api_key)
         self._kalshi = kalshi_client
 
-    async def generate_picks(self, balance: float) -> dict:
-        """Main entry point. Returns a ready-to-use slip with 3-5 legs."""
-        try:
-            markets = await self._get_available_markets()
-            if not markets:
-                return {"error": "No markets available right now"}
-            logger.info(f"[PICKS] Found {len(markets)} available markets")
-            return await self._build_slip(markets, balance)
-        except Exception as e:
-            logger.error(f"[PICKS] Error: {e}", exc_info=True)
-            return {"error": str(e)}
+    async def generate_all_slips(self, balance: float) -> dict:
+        """Generate all 3 slips for today."""
+        markets = await self._fetch_markets()
+        if len(markets) < 5:
+            return {"error": f"Not enough markets available ({len(markets)} found)"}
 
-    async def _get_available_markets(self) -> list:
-        """Fetch all open sports markets from Kalshi."""
+        logger.info(f"[PICKS] {len(markets)} markets available across all series")
+
+        slip_2x = await self._build_slip(markets, balance, target_odds=2.0,
+                                          slip_name="SAFE (2x)")
+        await asyncio.sleep(3)
+
+        slip_3x = await self._build_slip(markets, balance, target_odds=3.0,
+                                          slip_name="STANDARD (3x)")
+        await asyncio.sleep(3)
+
+        slip_5x = await self._build_slip(markets, balance, target_odds=5.0,
+                                          slip_name="BOLD (5x)")
+
+        return {
+            "date":               datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "markets_available":  len(markets),
+            "slip_2x":            slip_2x,
+            "slip_3x":            slip_3x,
+            "slip_5x":            slip_5x,
+        }
+
+    async def _fetch_markets(self) -> list:
+        """Fetch all open markets across all sports series."""
         all_markets = []
-        for series in SERIES:
+
+        for series in ALL_SERIES:
             try:
                 data = await self._kalshi._get("/markets", {
                     "series_ticker": series,
                     "status": "open",
-                    "limit": 50,
+                    "limit": 100,
                 })
+                sport = SERIES_TO_SPORT.get(series, "OTHER")
+
                 for m in data.get("markets", []):
                     yes_ask = float(m.get("yes_ask_dollars") or 0)
-                    if yes_ask <= 0.05 or yes_ask >= 0.95:
+                    if yes_ask < 0.10 or yes_ask > 0.90:
                         continue
-                    game_time = (
-                        m.get("occurrence_datetime") or
-                        m.get("close_time", "")
-                    )
+
+                    ticker = m.get("ticker", "")
+                    if "GAME" in series:
+                        mtype = "GAME_WINNER"
+                    elif "TOTAL" in series:
+                        mtype = "TOTAL"
+                    elif "PLAYER" in series:
+                        mtype = "PLAYER_PROP"
+                    elif "RFI" in series:
+                        mtype = "FIRST_INNING"
+                    else:
+                        mtype = "OTHER"
+
+                    game_time = (m.get("occurrence_datetime") or
+                                 m.get("close_time") or "")
+
                     all_markets.append({
-                        "ticker":           m.get("ticker", ""),
-                        "title":            m.get("title", ""),
-                        "pick_description": m.get("yes_sub_title", "") or m.get("title", ""),
-                        "series":           series,
-                        "yes_ask":          yes_ask,
-                        "yes_bid":          float(m.get("yes_bid_dollars") or 0),
-                        "odds":             round(1 / yes_ask, 3),
-                        "game_time":        game_time,
-                        "event_ticker":     m.get("event_ticker", ""),
+                        "ticker":       ticker,
+                        "series":       series,
+                        "sport":        sport,
+                        "market_type":  mtype,
+                        "title":        m.get("title", ""),
+                        "pick":         m.get("yes_sub_title", "") or m.get("title", ""),
+                        "yes_ask":      yes_ask,
+                        "yes_bid":      float(m.get("yes_bid_dollars") or 0),
+                        "odds":         round(1 / yes_ask, 3),
+                        "game_time":    game_time,
+                        "event_ticker": m.get("event_ticker", ""),
                     })
+
+                count = sum(1 for m in all_markets if m["series"] == series)
+                if count:
+                    logger.info(f"[PICKS] {series}: {count} valid markets")
+
             except Exception as e:
-                logger.warning(f"[PICKS] Error fetching {series}: {e}")
+                logger.warning(f"[PICKS] {series} fetch error: {e}")
 
         all_markets.sort(key=lambda x: x.get("game_time", ""))
         return all_markets
 
-    async def _build_slip(self, markets: list, balance: float) -> dict:
+    async def _build_slip(self, markets: list, balance: float,
+                           target_odds: float, slip_name: str) -> dict:
         """
-        Give Claude the market list and ask it to build the best slip.
-        One API call does research + selection.
+        Build one slip targeting specific combined odds.
+        Claude with web_search researches and selects picks in one call.
         """
-        markets_text = "\n".join([
-            f"- {m['ticker']} | {m['title']} | {m['pick_description']} | "
-            f"odds={m['odds']:.2f}x (yes_ask={m['yes_ask']:.2f}) | "
-            f"game_time={m['game_time'][:16]}"
-            for m in markets[:60]
-        ])
+        logger.info(f"[PICKS] Building {slip_name} slip...")
+
+        lines = []
+        for m in markets[:80]:
+            lines.append(
+                f"{m['ticker']} | {m['sport']} | {m['market_type']} | "
+                f"{m['pick']} | odds={m['odds']:.2f}x | "
+                f"game_time={m['game_time'][:16]}"
+            )
+        markets_text = "\n".join(lines)
+
+        if target_odds <= 2.0:
+            min_legs, max_legs = 4, 6
+            legs_desc = "4-6 legs at ~1.15x-1.25x each"
+        elif target_odds <= 3.0:
+            min_legs, max_legs = 4, 6
+            legs_desc = "4-6 legs at ~1.18x-1.30x each"
+        else:
+            min_legs, max_legs = 5, 8
+            legs_desc = "5-8 legs at ~1.20x-1.40x each"
 
         stake = round(min(balance * 0.10, 10_000.0), 2)
 
         prompt = f"""You are a sharp sports analyst building a Kalshi prediction market parlay slip.
 
-TODAY: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
+TODAY: {datetime.now(timezone.utc).strftime('%A %B %d, %Y')}
+TARGET: {slip_name} slip — combined odds as close to {target_odds}x as possible
 
 AVAILABLE KALSHI MARKETS:
 {markets_text}
 
-YOUR JOB:
-Select 3-5 picks from the list above to build a parlay worth 2.0x–5.0x combined odds.
+YOUR STRATEGY:
+Build this slip using {legs_desc}.
+The goal is MANY safe legs, not a few risky ones.
+Each individual leg should be highly likely to win (70-85% probability).
+Together they multiply to {target_odds}x combined odds.
 
-HARD RULES:
-1. Select EXACTLY 3 to 5 picks — never fewer than 3, never more than 5
-2. All picks must be from games happening TODAY or TOMORROW only
-3. No two picks from the same event_ticker (same game)
-4. Combined odds target: 2.0x minimum, 5.0x maximum
-5. Only use tickers that appear verbatim in the list above — do NOT invent tickers
-6. Prefer picks where yes_ask is between 0.55 and 0.80 (safer, higher probability)
+Think: 5 near-certain picks at 1.25x each = 3.05x combined.
+That's far better than 2 risky picks at 1.73x each = 3.0x combined.
+The first wins ~70% of the time, the second only ~40%.
 
-RESEARCH:
-Use your sports knowledge to evaluate each pick:
-- Which team/total has the statistical edge right now?
-- Recent form, injuries, home/away splits, pace matchups
-- For TOTAL markets: is a low-total OVER safer than a high-total OVER?
-- For GAME markets: does one team have a clear edge?
+PICK SELECTION RULES:
+1. Use {min_legs}-{max_legs} legs — NEVER fewer than {min_legs}
+2. Mix sports when possible (NBA + MLB + NHL adds diversity)
+3. Mix market types when possible (totals + game winners + player props)
+4. For TOTAL markets: pick OVER on LOW lines (safer), not UNDER on high lines
+5. For GAME_WINNER: only pick clear favorites (odds 1.2x-1.5x max)
+6. For PLAYER_PROP: pick player props with very low bars (1+ threes, 10+ points)
+7. All picks from games happening today or tomorrow ONLY
+8. Never pick two markets from the exact same event_ticker
+9. Calibrate totals DOWN by 3-5 points from the consensus line for safety
+   Example: if OVER 218.5 exists, pick OVER 213.5 instead
+10. ONLY use tickers from the list above — never invent tickers
 
-CALIBRATION:
-For TOTAL markets, prefer the lower line variants (safer OVER).
-Example: if you like OVER on a high-pace game, pick the OVER 210.5 not OVER 220.5.
+Use web search to check:
+- Current injury reports (is the star player actually playing?)
+- Recent team form (last 5 games)
+- Head to head records
+- Today's confirmed lineups if available
 
-Return ONLY this JSON — no other text, no markdown fences:
+Respond ONLY with valid JSON, no other text:
 {{
+    "slip_name": "{slip_name}",
+    "target_odds": {target_odds},
     "legs": [
         {{
-            "ticker": "exact ticker from list",
+            "ticker": "exact ticker from list above",
+            "sport": "NBA/MLB/NHL/NFL",
+            "market_type": "TOTAL/GAME_WINNER/PLAYER_PROP/FIRST_INNING",
             "game": "Team A vs Team B",
-            "pick": "what we are betting (e.g. Over 218.5 pts, Lakers win)",
-            "odds": 1.45,
+            "pick": "exact pick description",
+            "odds": 1.25,
             "confidence": 8.2,
-            "reasoning": "2 sentence explanation of why this pick is good"
+            "reasoning": "why this pick is safe and likely to hit"
         }}
     ],
-    "combined_odds": 3.24,
+    "combined_odds": {target_odds},
     "overall_confidence": 7.8,
-    "summary": "One sentence describing why this is a solid slip today"
+    "summary": "one sentence why this slip is solid"
 }}"""
 
         try:
             response = self._anthropic.messages.create(
                 model="claude-sonnet-4-5",
-                max_tokens=1500,
+                max_tokens=2000,
                 tools=[{"type": "web_search_20250305", "name": "web_search"}],
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -151,54 +223,61 @@ Return ONLY this JSON — no other text, no markdown fences:
             text = text.strip()
             if "```" in text:
                 text = re.sub(r"```json?\n?", "", text).rstrip("`").strip()
-            json_match = re.search(r"\{.*\}", text, re.DOTALL)
-            if json_match:
-                text = json_match.group()
 
-            slip_data = json.loads(text)
+            json_match = re.search(r"\{[\s\S]*\}", text)
+            if not json_match:
+                raise ValueError(f"No JSON found in response: {text[:200]}")
 
-            # Validate: tickers must exist in our real market list
-            valid_tickers = {m["ticker"] for m in markets}
-            validated_legs = [
-                leg for leg in slip_data.get("legs", [])
-                if leg.get("ticker") in valid_tickers
-            ]
+            slip_data = json.loads(json_match.group())
+            legs = slip_data.get("legs", [])
 
-            invalid_count = len(slip_data.get("legs", [])) - len(validated_legs)
-            if invalid_count:
-                logger.warning(
-                    f"[PICKS] Dropped {invalid_count} legs with invalid tickers"
-                )
+            if len(legs) < 2:
+                raise ValueError(f"Only {len(legs)} legs returned")
 
-            if len(validated_legs) < 2:
-                return {"error": "Not enough valid picks found — no valid tickers"}
-
-            # Pin odds to actual Kalshi prices (not what AI guessed)
+            # Validate tickers and pin odds to real Kalshi prices
             ticker_map = {m["ticker"]: m for m in markets}
+            valid_legs = []
             combined = 1.0
-            for leg in validated_legs:
-                mkt = ticker_map[leg["ticker"]]
-                leg["odds"]     = mkt["odds"]
-                leg["yes_ask"]  = mkt["yes_ask"]
+
+            for leg in legs:
+                ticker = leg.get("ticker", "")
+                if ticker not in ticker_map:
+                    logger.warning(f"[PICKS] Invalid ticker: {ticker!r}")
+                    continue
+                mkt = ticker_map[ticker]
+                leg["odds"]      = mkt["odds"]
+                leg["yes_ask"]   = mkt["yes_ask"]
                 leg["game_time"] = mkt["game_time"]
                 combined *= mkt["odds"]
+                valid_legs.append(leg)
+
+            if len(valid_legs) < 2:
+                raise ValueError("Not enough valid tickers after validation")
 
             combined = round(combined, 4)
+            logger.info(
+                f"[PICKS] {slip_name}: {len(valid_legs)} legs, "
+                f"{combined}x odds, conf={slip_data.get('overall_confidence')}"
+            )
 
             return {
-                "date":               datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                "legs":               validated_legs,
+                "slip_name":          slip_name,
+                "target_odds":        target_odds,
+                "legs":               valid_legs,
                 "combined_odds":      combined,
+                "leg_count":          len(valid_legs),
                 "overall_confidence": float(slip_data.get("overall_confidence") or 0),
                 "summary":            slip_data.get("summary", ""),
                 "stake":              stake,
                 "potential_payout":   round(stake * combined, 2),
-                "leg_count":          len(validated_legs),
+                "status":             "READY",
             }
 
-        except json.JSONDecodeError as e:
-            logger.error(f"[PICKS] JSON parse error: {e} | text: {text[:300]}")
-            return {"error": f"Failed to parse picks response: {e}"}
         except Exception as e:
-            logger.error(f"[PICKS] Build slip error: {e}", exc_info=True)
-            return {"error": str(e)}
+            logger.error(f"[PICKS] {slip_name} failed: {e}")
+            return {
+                "slip_name":   slip_name,
+                "target_odds": target_odds,
+                "status":      "FAILED",
+                "error":       str(e),
+            }

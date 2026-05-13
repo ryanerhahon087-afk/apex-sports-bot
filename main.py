@@ -162,7 +162,7 @@ def get_simulate_results():
 @app.route("/api/generate", methods=["POST"])
 def generate_picks():
     if kalshi is None:
-        return jsonify({"error": "Bot not ready yet — try again in 10s"}), 503
+        return jsonify({"error": "Bot not ready, try again in 10 seconds"}), 503
 
     try:
         from utils.picks_engine import PicksEngine
@@ -172,48 +172,57 @@ def generate_picks():
         async def _run():
             if not kalshi._session:
                 await kalshi.connect()
-            return await engine.generate_picks(balance)
+            return await engine.generate_all_slips(balance)
 
-        loop   = asyncio.new_event_loop()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         result = loop.run_until_complete(_run())
         loop.close()
 
         if result.get("error"):
             return jsonify({"error": result["error"]}), 500
 
-        if result.get("legs") and db:
-            slip_id = db.save_slip(
-                slip={
-                    "slip_type":       "DAILY",
-                    "sport_mix":       ",".join(sorted(set(
-                        _infer_sport(l["ticker"]) for l in result["legs"]
-                    ))),
-                    "combined_odds":   result["combined_odds"],
-                    "stake":           result["stake"],
-                    "potential_payout": result["potential_payout"],
-                    "confidence":      result["overall_confidence"],
-                    "projected_finish": max(
-                        (l.get("game_time", "") for l in result["legs"]),
-                        default="",
-                    ),
-                },
-                legs=[{
-                    "sport":          _infer_sport(l["ticker"]),
-                    "game":           l["game"],
-                    "market_type":    "TOTAL" if "TOTAL" in l["ticker"] else "GAME_WINNER",
-                    "pick":           l["pick"],
-                    "original_line":  l["pick"],
-                    "calibrated_line": l["pick"],
-                    "kalshi_ticker":  l["ticker"],
-                    "individual_odds": l["odds"],
-                    "confidence":     l["confidence"],
-                    "ai_reasoning":   l["reasoning"],
-                    "game_start":     l.get("game_time", ""),
-                } for l in result["legs"]],
-            )
-            result["slip_id"] = slip_id
+        # Save each valid slip to DB
+        if db:
+            for slip_key in ("slip_2x", "slip_3x", "slip_5x"):
+                slip = result.get(slip_key, {})
+                if slip.get("status") != "READY" or not slip.get("legs"):
+                    continue
+                try:
+                    slip_id = db.save_slip(
+                        slip={
+                            "slip_type":       "DAILY",
+                            "sport_mix":       ",".join(sorted(set(
+                                l.get("sport", "?") for l in slip["legs"]
+                            ))),
+                            "combined_odds":   slip["combined_odds"],
+                            "stake":           slip["stake"],
+                            "potential_payout": slip["potential_payout"],
+                            "confidence":      slip["overall_confidence"],
+                            "projected_finish": max(
+                                (l.get("game_time", "") for l in slip["legs"]),
+                                default="",
+                            ),
+                        },
+                        legs=[{
+                            "sport":          l.get("sport", "?"),
+                            "game":           l.get("game", ""),
+                            "market_type":    l.get("market_type", ""),
+                            "pick":           l.get("pick", ""),
+                            "original_line":  l.get("pick", ""),
+                            "calibrated_line": l.get("pick", ""),
+                            "kalshi_ticker":  l.get("ticker", ""),
+                            "individual_odds": l.get("odds", 0),
+                            "confidence":     l.get("confidence", 0),
+                            "ai_reasoning":   l.get("reasoning", ""),
+                            "game_start":     l.get("game_time", ""),
+                        } for l in slip["legs"]],
+                    )
+                    result[slip_key]["slip_id"] = slip_id
+                except Exception as save_err:
+                    logger.error(f"[GEN] Save {slip_key} error: {save_err}")
 
-        return jsonify({"success": True, "slip": result})
+        return jsonify({"success": True, "result": result})
 
     except Exception as e:
         logger.error(f"[GEN] Generate error: {e}", exc_info=True)
@@ -222,25 +231,27 @@ def generate_picks():
 
 @app.route("/api/picks/today")
 def todays_picks():
-    if not db:
-        return jsonify({"date": datetime.now(timezone.utc).date().isoformat(), "slips": []})
-    today = datetime.now(timezone.utc).date().isoformat()
-    slips = db.get_recent_slips(10)
-    today_slips = [s for s in slips if (s.get("created_at") or "")[:10] == today]
-    result = []
-    for slip in today_slips:
-        legs = db.get_slip_legs(slip["id"])
-        result.append({
-            "slip_id":        slip["id"],
-            "slip_type":      slip["slip_type"],
-            "combined_odds":  slip["combined_odds"],
-            "confidence":     slip["confidence"],
-            "stake":          slip["stake"],
-            "potential_payout": slip["potential_payout"],
-            "status":         slip["status"],
-            "legs":           legs,
-        })
-    return jsonify({"date": today, "slips": result})
+    try:
+        slips = db.get_recent_slips(10) if db else []
+        today = datetime.now(timezone.utc).date().isoformat()
+        today_slips = [s for s in slips if (s.get("created_at") or "")[:10] == today]
+        result = []
+        for slip in today_slips:
+            legs = db.get_slip_legs(slip["id"]) if db else []
+            result.append({
+                "slip_id":        slip["id"],
+                "slip_type":      slip["slip_type"],
+                "combined_odds":  slip["combined_odds"],
+                "confidence":     slip["confidence"],
+                "stake":          slip["stake"],
+                "potential_payout": slip["potential_payout"],
+                "status":         slip["status"],
+                "sport_mix":      slip.get("sport_mix", ""),
+                "legs":           legs,
+            })
+        return jsonify({"date": today, "slips": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/pause", methods=["POST"])
@@ -607,24 +618,24 @@ body::before { content:''; position:fixed; inset:0; background:radial-gradient(e
 <div class="main">
 
   <!-- TODAY'S PICKS -->
-  <div class="picks-card" id="picks-card">
-    <div class="card-hdr" style="margin-bottom:0">
-      <div class="card-title" style="font-size:13px;letter-spacing:1.5px">
-        <span class="card-dot" style="background:var(--green)"></span>
-        TODAY'S PICKS
-        <span id="picks-count-badge" style="display:none;margin-left:8px;background:rgba(0,232,122,0.15);color:var(--green);border:1px solid rgba(0,232,122,0.3);padding:2px 10px;border-radius:10px;font-size:11px;font-family:'Space Mono'"></span>
+  <div class="picks-card" id="picks-section">
+    <div class="card-hdr">
+      <div class="card-title">
+        <span class="card-dot" style="background:var(--gold)"></span>
+        Today's Picks
+        <span id="picks-date" style="font-size:11px;color:var(--muted);margin-left:8px"></span>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
-        <span id="picks-date" class="picks-date-label"></span>
-        <button class="picks-refresh-btn" onclick="fetchTodaysPicks()">↻ Refresh</button>
-        <button class="picks-gen-btn" onclick="generateNow()">⚡ Generate Picks</button>
+        <span id="picks-count" class="badge" style="background:rgba(255,200,32,0.1);border:1px solid rgba(255,200,32,0.3);color:var(--gold)"></span>
+        <button class="ctrl-btn" onclick="refreshPicks()" id="refresh-btn">↺ Refresh</button>
+        <button class="picks-gen-btn" onclick="generatePicks()" id="gen-picks-btn">⚡ Generate Picks</button>
       </div>
     </div>
     <div id="picks-content" style="margin-top:20px">
       <div class="picks-empty">
         <strong>No picks generated yet today</strong>
-        Click "Generate Picks" to create today's slip recommendations,<br>
-        or wait for the scheduled 10AM–12PM ET generation window.
+        Click "Generate Picks" to build today's 3 slips (Safe 2x · Standard 3x · Bold 5x).<br>
+        <span style="font-size:12px">Each slip uses 4-6 high-probability legs researched with live web data.</span>
       </div>
     </div>
   </div>
@@ -1743,102 +1754,136 @@ async function fetchSimulationResults() {
 }
 
 // ── TODAY'S PICKS ─────────────────────────────────────────────────────────────
-async function fetchTodaysPicks() {
+
+async function generatePicks() {
+  const btn = document.getElementById('gen-picks-btn');
+  btn.textContent = '⏳ Generating...';
+  btn.disabled = true;
+  document.getElementById('picks-content').innerHTML =
+    '<div style="text-align:center;padding:40px;color:var(--muted)">Researching markets with live web data...<br><span style="font-size:11px">Building 3 slips: Safe 2x · Standard 3x · Bold 5x</span></div>';
+  try {
+    const r = await fetch('/api/generate', {method:'POST'});
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    renderPicksFromResult(d.result);
+  } catch(e) {
+    document.getElementById('picks-content').innerHTML =
+      '<div style="color:var(--red);padding:20px;text-align:center">Error: ' + e.message + '</div>';
+  } finally {
+    btn.textContent = '⚡ Generate Picks';
+    btn.disabled = false;
+  }
+}
+
+async function refreshPicks() {
   try {
     const r = await fetch('/api/picks/today');
     const d = await r.json();
-    renderTodaysPicks(d);
-  } catch(e) { console.error('Picks fetch error:', e); }
+    if (d.slips && d.slips.length > 0) renderPicksFromDB(d.slips, d.date);
+  } catch(e) { console.error('Refresh picks error:', e); }
 }
 
-function renderTodaysPicks(data) {
-  const picks = data.picks || [];
-  const date  = data.date  || '';
-
-  const dateEl = document.getElementById('picks-date');
-  const badge  = document.getElementById('picks-count-badge');
-  if (dateEl) dateEl.textContent = date;
-
-  const content = document.getElementById('picks-content');
-  if (!content) return;
-
-  if (!picks.length) {
-    badge.style.display = 'none';
-    content.innerHTML = `<div class="picks-empty">
-      <strong>No picks generated yet today</strong>
-      Click "Generate Picks" to create today's slip recommendations,<br>
-      or wait for the scheduled 10AM–12PM ET generation window.
-    </div>`;
+function renderPicksFromResult(result) {
+  if (!result || result.error) {
+    document.getElementById('picks-content').innerHTML =
+      '<div style="color:var(--red);padding:20px;text-align:center">' + (result?.error || 'Failed to generate') + '</div>';
     return;
   }
+  const dateEl = document.getElementById('picks-date');
+  const countEl = document.getElementById('picks-count');
+  if (dateEl) dateEl.textContent = result.date || '';
+  if (countEl) countEl.textContent = (result.markets_available || 0) + ' markets scanned';
 
-  badge.textContent  = picks.length + (picks.length === 1 ? ' slip' : ' slips');
-  badge.style.display = 'inline';
+  const slipDefs = [
+    {key:'slip_2x', label:'SAFE',     color:'var(--green)', target:'~2x'},
+    {key:'slip_3x', label:'STANDARD', color:'var(--blue)',  target:'~3x'},
+    {key:'slip_5x', label:'BOLD',     color:'var(--gold)',  target:'~5x'},
+  ];
 
-  const sportIcon = s => ({NBA:'🏀',NFL:'🏈',MLB:'⚾',NHL:'🏒',TENNIS:'🎾',SOCCER:'⚽',NCAAFB:'🏈',NCAAMB:'🏀'})[s] || '🎯';
-  const confClass  = c => c >= 8 ? 'pc-high' : c >= 6 ? 'pc-mid' : 'pc-low';
-  const typeCls    = t => ({'DAILY':'daily','ROLLOVER':'rollover','LOTTO':'lotto'}[t] || 'daily');
-  const statusSpan = s => {
-    const cls = s === 'WON' ? 'ts-won' : s === 'LOST' ? 'ts-lost' : 'ts-pending';
-    const lbl = s === 'PENDING' ? 'OPEN' : s;
-    return `<span class="ticket-status ${cls}">${lbl}</span>`;
-  };
-  const kalshiUrl = leg => {
-    const search = leg.kalshi_ticker || leg.kalshi_search || leg.game || '';
-    return `https://kalshi.com/markets?search=${encodeURIComponent(search)}`;
-  };
-
-  content.innerHTML = picks.map(slip => {
-    const tc = typeCls(slip.slip_type);
-    const legsHtml = (slip.legs || []).map(leg => {
-      const conf = Number(leg.confidence) || 0;
-      const odds = Number(leg.odds) || 0;
-      const reasoning = leg.reasoning ? `<div class="pick-reasoning">💡 ${leg.reasoning}</div>` : '';
-      const lineDiff = leg.original_line && leg.calibrated_line && leg.original_line !== leg.calibrated_line
-        ? `<span style="font-size:11px;color:var(--muted);text-decoration:line-through;margin-left:8px">${leg.original_line}</span>` : '';
-      return `<div class="pick-row">
-        <div class="pick-sport-icon">${sportIcon(leg.sport)}</div>
-        <div class="pick-body">
-          <div class="pick-game">${leg.game || '—'}</div>
-          <div class="pick-line">${leg.pick || '—'}${lineDiff}</div>
-          ${reasoning}
-          <div class="pick-meta">
-            <span class="pick-conf ${confClass(conf)}">Conf ${conf.toFixed(1)}/10</span>
-            <span class="pick-odds-badge">${odds.toFixed(2)}x</span>
-            <a class="kalshi-btn" href="${kalshiUrl(leg)}" target="_blank" rel="noopener">
-              Search Kalshi →
-            </a>
+  const html = slipDefs.map(({key, label, color, target}) => {
+    const slip = result[key];
+    if (!slip || slip.status === 'FAILED') {
+      return `<div style="padding:14px;border:1px solid var(--border);border-radius:10px;margin-bottom:12px;opacity:0.6">
+        <span style="color:${color};font-weight:700">${label} ${target}</span>
+        <span style="color:var(--red);margin-left:12px;font-size:12px">Failed: ${slip?.error||'unknown'}</span>
+      </div>`;
+    }
+    const sportIcon = s => ({NBA:'🏀',MLB:'⚾',NHL:'🏒',NFL:'🏈'})[s]||'🎯';
+    const legsHtml = (slip.legs||[]).map(leg => `
+      <div style="display:flex;align-items:flex-start;gap:12px;padding:12px 0;border-bottom:1px solid rgba(26,40,64,0.5)">
+        <span style="font-size:20px;flex-shrink:0;margin-top:2px">${sportIcon(leg.sport)}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:14px;font-weight:700;margin-bottom:4px">${leg.game||'—'}</div>
+          <div style="color:${color};font-family:'Space Mono';font-size:14px;font-weight:700;margin-bottom:6px">${leg.pick||'—'}</div>
+          <div style="font-size:12px;color:var(--muted);line-height:1.5">${leg.reasoning||''}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0;min-width:70px">
+          <div style="font-family:'Space Mono';font-size:14px;color:${color};font-weight:700">${(leg.odds||0).toFixed(2)}x</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:2px">conf ${(leg.confidence||0).toFixed(1)}</div>
+          <a href="https://kalshi.com/markets?search=${encodeURIComponent((leg.game||'').split(' vs ')[0]||leg.ticker||'')}"
+             target="_blank" style="font-size:10px;color:var(--blue);text-decoration:none;display:block;margin-top:6px">
+            Kalshi →
+          </a>
+        </div>
+      </div>`).join('');
+    return `
+      <div style="background:var(--bg2);border:1px solid var(--border);border-left:3px solid ${color};border-radius:12px;padding:18px;margin-bottom:14px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="border:1px solid ${color};color:${color};padding:4px 14px;border-radius:6px;font-size:12px;font-weight:700;font-family:'Space Mono'">${label}</span>
+            <span style="font-size:12px;color:var(--muted)">${slip.leg_count} legs</span>
+          </div>
+          <div style="text-align:right">
+            <div style="font-family:'Space Mono';font-size:22px;font-weight:700;color:${color}">${(slip.combined_odds||0).toFixed(2)}x</div>
+            <div style="font-size:10px;color:var(--muted)">combined odds</div>
+          </div>
+        </div>
+        ${legsHtml}
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
+          <div style="font-size:12px;color:var(--muted);flex:1;padding-right:16px">${slip.summary||''}</div>
+          <div style="text-align:right;flex-shrink:0">
+            <div style="font-size:11px;color:var(--muted)">Stake $${(slip.stake||0).toFixed(2)}</div>
+            <div style="font-family:'Space Mono';font-size:14px;color:${color};font-weight:700">→ $${(slip.potential_payout||0).toFixed(2)} if all win</div>
           </div>
         </div>
       </div>`;
-    }).join('');
-
-    const combinedOdds  = Number(slip.combined_odds) || 0;
-    const stake         = Number(slip.stake_suggestion) || 0;
-    const payout        = Number(slip.potential_payout) || 0;
-
-    return `<div class="ticket ticket-${tc}">
-      <div class="ticket-hdr">
-        <div class="ticket-type">
-          <span class="ticket-badge tb-${tc}">${slip.slip_type}</span>
-          <span style="font-size:13px;color:var(--muted)">${(slip.sport_mix||'').replace(/,/g,' · ')}</span>
-        </div>
-        ${statusSpan(slip.status)}
-      </div>
-      <div class="ticket-legs">${legsHtml}</div>
-      <div class="ticket-footer">
-        <div class="ticket-combined">
-          <span class="tc-odds">${combinedOdds.toFixed(2)}x</span>
-          <span class="tc-label">combined odds</span>
-        </div>
-        <div class="ticket-stake-box">
-          <div class="tsb-label">Suggested stake</div>
-          <div class="tsb-value">$${stake.toFixed(2)}</div>
-          <div class="tsb-payout">→ $${payout.toFixed(2)} if all legs win</div>
-        </div>
-      </div>
-    </div>`;
   }).join('');
+  document.getElementById('picks-content').innerHTML = html;
+}
+
+function renderPicksFromDB(slips, date) {
+  if (!slips || !slips.length) return;
+  const dateEl = document.getElementById('picks-date');
+  const countEl = document.getElementById('picks-count');
+  if (dateEl) dateEl.textContent = date || '';
+  if (countEl) countEl.textContent = slips.length + ' slip' + (slips.length!==1?'s':'') + ' saved';
+  const sportIcon = s => ({NBA:'🏀',MLB:'⚾',NHL:'🏒',NFL:'🏈'})[s]||'🎯';
+  const html = slips.map(slip => {
+    const odds = slip.combined_odds || 0;
+    const color = odds >= 4 ? 'var(--gold)' : odds >= 2.5 ? 'var(--blue)' : 'var(--green)';
+    const legsHtml = (slip.legs||[]).map(leg => `
+      <div style="padding:10px 0;border-bottom:1px solid rgba(26,40,64,0.4);display:flex;gap:10px;align-items:flex-start">
+        <span style="font-size:18px;flex-shrink:0">${sportIcon(leg.sport)}</span>
+        <div style="flex:1">
+          <div style="font-size:13px;color:var(--muted);margin-bottom:2px">${leg.game||''}</div>
+          <div style="font-size:14px;font-weight:700;color:${color}">${leg.pick||leg.calibrated_line||''}</div>
+          ${leg.ai_reasoning?`<div style="font-size:11px;color:var(--muted);margin-top:4px;line-height:1.5">${leg.ai_reasoning}</div>`:''}
+        </div>
+        <div style="font-family:'Space Mono';font-size:13px;color:${color};flex-shrink:0">${(leg.individual_odds||0).toFixed(2)}x</div>
+      </div>`).join('');
+    return `
+      <div style="background:var(--bg2);border:1px solid var(--border);border-left:3px solid ${color};border-radius:12px;padding:16px;margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <span style="color:var(--muted);font-size:12px">${slip.sport_mix||''} · ${slip.status||''}</span>
+          <span style="font-family:'Space Mono';font-size:20px;font-weight:700;color:${color}">${odds.toFixed(2)}x</span>
+        </div>
+        ${legsHtml}
+        <div style="margin-top:12px;font-size:11px;color:var(--muted)">
+          Stake $${(slip.stake||0).toFixed(2)} → <span style="color:${color};font-weight:700">$${(slip.potential_payout||0).toFixed(2)}</span> potential
+        </div>
+      </div>`;
+  }).join('');
+  document.getElementById('picks-content').innerHTML = html;
 }
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -1867,7 +1912,7 @@ function formatFinish(isoStr) {
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
 function init() {
-  fetchTodaysPicks();
+  refreshPicks();
   fetchStatus();
   fetchSlips();
   fetchRollover();
@@ -1881,7 +1926,7 @@ function init() {
   setInterval(fetchSlips, 30000);
   setInterval(fetchRollover, 30000);
   setInterval(fetchStats, 60000);
-  setInterval(fetchTodaysPicks, 60000);
+  setInterval(refreshPicks, 60000);
 }
 
 window.addEventListener('load', init);
