@@ -65,7 +65,7 @@ class PicksEngine:
         }
 
     async def _fetch_markets(self) -> list:
-        """Fetch all open markets across all sports series."""
+        """Fetch all open markets across all sports series (no odds filter here)."""
         all_markets = []
 
         for series in ALL_SERIES:
@@ -79,7 +79,7 @@ class PicksEngine:
 
                 for m in data.get("markets", []):
                     yes_ask = float(m.get("yes_ask_dollars") or 0)
-                    if yes_ask < 0.40 or yes_ask > 0.87:
+                    if yes_ask <= 0 or yes_ask >= 1:
                         continue
 
                     # Filter out individual team total markets (hallucinated by AI)
@@ -131,6 +131,17 @@ class PicksEngine:
         all_markets.sort(key=lambda x: x.get("game_time", ""))
         return all_markets
 
+    def _get_eligible_markets(self, markets: list, target_odds: float) -> list:
+        """Filter markets to the odds range appropriate for this slip's target."""
+        if target_odds <= 2.0:
+            min_ask, max_ask = 0.55, 0.87   # 1.15x – 1.82x per leg
+        elif target_odds <= 3.0:
+            min_ask, max_ask = 0.45, 0.87   # 1.15x – 2.22x per leg
+        else:
+            min_ask, max_ask = 0.35, 0.87   # 1.15x – 2.86x per leg
+
+        return [m for m in markets if min_ask <= m["yes_ask"] <= max_ask]
+
     async def _build_slip(self, markets: list, balance: float,
                            target_odds: float, slip_name: str) -> dict:
         """
@@ -139,8 +150,17 @@ class PicksEngine:
         """
         logger.info(f"[PICKS] Building {slip_name} slip...")
 
+        eligible = self._get_eligible_markets(markets, target_odds)
+        if len(eligible) < 3:
+            return {
+                "slip_name":   slip_name,
+                "target_odds": target_odds,
+                "status":      "FAILED",
+                "error":       f"Not enough eligible markets for {slip_name} ({len(eligible)} found)",
+            }
+
         lines = []
-        for m in markets[:80]:
+        for m in eligible[:80]:
             lines.append(
                 f"{m['ticker']} | {m['sport']} | {m['market_type']} | "
                 f"{m['pick']} | odds={m['odds']:.2f}x | "
@@ -150,13 +170,24 @@ class PicksEngine:
 
         if target_odds <= 2.0:
             min_legs, max_legs = 4, 6
-            legs_desc = "4-6 legs at ~1.15x-1.25x each"
+            legs_desc = "4-6 legs"
+            odds_range_desc = "1.15x-1.82x per leg"
+            bold_instruction = ""
         elif target_odds <= 3.0:
             min_legs, max_legs = 4, 6
-            legs_desc = "4-6 legs at ~1.18x-1.30x each"
+            legs_desc = "4-6 legs"
+            odds_range_desc = "1.15x-2.22x per leg"
+            bold_instruction = ""
         else:
-            min_legs, max_legs = 5, 8
-            legs_desc = "5-8 legs at ~1.20x-1.40x each"
+            min_legs, max_legs = 6, 8
+            legs_desc = "6-8 legs"
+            odds_range_desc = "1.15x-2.86x per leg"
+            bold_instruction = """
+YOU MUST reach at least 4.5x combined odds minimum.
+Use 6-8 legs. Include some picks at 1.5x-2.5x odds alongside the safer 1.15x-1.25x picks.
+A mix of safer and slightly bolder picks is better than all low-odds picks that can't reach the target.
+Example that works: 4 legs at 1.20x + 2 legs at 1.60x = 1.20^4 × 1.60^2 = 5.31x ✓
+Example that fails: 7 legs at 1.20x = 3.58x ✗"""
 
         stake = round(min(balance * 0.10, 10_000.0), 2)
 
@@ -164,19 +195,14 @@ class PicksEngine:
 
 TODAY: {datetime.now(timezone.utc).strftime('%A %B %d, %Y')}
 TARGET: {slip_name} slip — combined odds as close to {target_odds}x as possible
-
-AVAILABLE KALSHI MARKETS:
+{bold_instruction}
+AVAILABLE KALSHI MARKETS (filtered to {odds_range_desc}):
 {markets_text}
 
 YOUR STRATEGY:
-Build this slip using {legs_desc}.
-The goal is MANY safe legs, not a few risky ones.
-Each individual leg should be highly likely to win (70-85% probability).
-Together they multiply to {target_odds}x combined odds.
-
-Think: 5 near-certain picks at 1.25x each = 3.05x combined.
-That's far better than 2 risky picks at 1.73x each = 3.0x combined.
-The first wins ~70% of the time, the second only ~40%.
+Build this slip using {legs_desc} ({odds_range_desc}).
+Each individual leg should be highly likely to win (65-85% probability).
+Together they must multiply to AT LEAST {target_odds * 0.90:.1f}x combined odds (target {target_odds}x).
 
 IMPORTANT: Only Kalshi market types that actually exist:
 1. GAME_WINNER - Will [team] win? YES/NO
@@ -185,20 +211,18 @@ IMPORTANT: Only Kalshi market types that actually exist:
 
 DO NOT pick individual team scoring totals.
 DO NOT pick markets with odds below 1.15x (too certain, bad value).
-DO NOT pick markets with odds above 2.5x per single leg (too risky).
+DO NOT pick markets with odds above 2.9x per single leg (too risky).
 
 PICK SELECTION RULES:
 1. Use {min_legs}-{max_legs} legs — NEVER fewer than {min_legs}
 2. Mix sports when possible (NBA + MLB + NHL adds diversity)
 3. Mix market types when possible (totals + game winners + player props)
 4. For TOTAL markets: pick OVER on LOW lines (safer), not UNDER on high lines
-5. For GAME_WINNER: only pick clear favorites (odds 1.2x-1.5x max)
+5. For GAME_WINNER: only pick clear favorites (odds 1.2x-2.0x)
 6. For PLAYER_PROP: pick player props with very low bars (1+ threes, 10+ points)
 7. All picks from games happening today or tomorrow ONLY
 8. Never pick two markets from the exact same event_ticker
-9. Calibrate totals DOWN by 3-5 points from the consensus line for safety
-   Example: if OVER 218.5 exists, pick OVER 213.5 instead
-10. ONLY use tickers from the list above — never invent tickers
+9. ONLY use tickers from the list above — never invent tickers
 
 Use web search to check:
 - Current injury reports (is the star player actually playing?)
