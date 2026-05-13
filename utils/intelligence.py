@@ -150,6 +150,16 @@ Slip type: {slip_type}
 RESEARCH DATA:
 {json.dumps(research, indent=2)}
 
+KALSHI MARKET TYPES — CRITICAL:
+Kalshi sports only offers TWO market types:
+1. GAME_WINNER — Will [team] win the game? (yes/no binary)
+2. TOTAL — Will BOTH teams COMBINED score over X points/runs?
+
+Kalshi does NOT offer: individual team totals, player props, spreads,
+or any per-team scoring markets. If this pick is for an individual team
+total (e.g. "Will [team] score over X?"), set include_in_slip: false
+and explain in reasoning. Only evaluate GAME_WINNER and combined TOTAL.
+
 EVALUATION TASK:
 1. What is the realistic probability this pick wins? (0-100%)
 2. Is there any reason this pick might fail?
@@ -306,6 +316,15 @@ VALID COMBINATIONS:
 - Game winner + Total from same game (allowed)
 - Any picks from different games (always allowed)
 - Different sports can be combined freely
+
+CRITICAL — VALID LEG TYPES ONLY:
+Only include legs that are one of these two types:
+1. GAME_WINNER — a team wins the game (yes/no)
+2. TOTAL — BOTH teams combined score over/under X points or runs
+
+Never include individual team scoring totals (e.g. "Will Lakers score over 110?").
+Those do not exist on Kalshi. If any candidate appears to be a team total,
+skip it and pick the next best candidate.
 
 Select the optimal combination and return in this exact JSON format:
 {{

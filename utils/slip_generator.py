@@ -196,14 +196,13 @@ class SlipGenerator:
         return "OTHER"
 
     def _infer_market_type(self, series: str, market: dict) -> str:
+        # Kalshi sports only supports GAME_WINNER and combined TOTAL.
+        # PLAYER_PROP, SPREAD, TEAM_TOTAL do not exist — map everything
+        # else to OTHER so it gets filtered before evaluation.
         if "GAME" in series:
             return "GAME_WINNER"
         elif "TOTAL" in series:
             return "TOTAL"
-        elif "PLAYER" in series:
-            return "PLAYER_PROP"
-        elif "SPREAD" in series:
-            return "SPREAD"
         return "OTHER"
 
     # ── RESEARCH ──────────────────────────────────────────────────────────────
@@ -271,6 +270,14 @@ class SlipGenerator:
                 )
 
             for market in top_markets:
+                # Only GAME_WINNER and combined TOTAL exist on Kalshi sports
+                if market.get("market_type") not in ("GAME_WINNER", "TOTAL"):
+                    logger.debug(
+                        f"[GEN] Skipping {market.get('ticker','')} — "
+                        f"type '{market.get('market_type')}' not on Kalshi"
+                    )
+                    continue
+
                 # Build pick dict
                 pick = {
                     "game": game["title"],
@@ -363,9 +370,34 @@ class SlipGenerator:
             logger.warning("[GEN] No eligible candidates for daily slip")
             return None
 
+        # FIX: Same-date filter — only use games from the earliest calendar date.
+        # Legs from different days cannot be on the same Kalshi parlay.
+        game_dates = []
+        for c in eligible:
+            gs = c.get("game_start", "")
+            if gs:
+                try:
+                    dt = datetime.fromisoformat(gs.replace("Z", "+00:00"))
+                    game_dates.append(dt.date())
+                except Exception:
+                    pass
+        if game_dates:
+            target_date = min(game_dates)
+            target_date_str = str(target_date)
+            eligible = [c for c in eligible
+                        if c.get("game_start", "")[:10] == target_date_str]
+            logger.info(
+                f"[GEN] Same-date filter: {len(eligible)} candidates "
+                f"for {target_date}"
+            )
+
+        if not eligible:
+            logger.warning("[GEN] No candidates after same-date filter")
+            return None
+
         logger.info(f"[GEN] Daily: {len(eligible)} eligible candidates")
 
-        # FIX 2: Use yes_ask directly for individual_odds; skip zero-odds candidates
+        # Use yes_ask directly for individual_odds; skip zero-odds candidates
         # Also include game_start so assemble_slip can pass it through to legs
         daily_candidates = []
         for c in eligible:
@@ -402,6 +434,51 @@ class SlipGenerator:
 
         if not slip_data.get("selected_legs"):
             return None
+
+        # FIX: Force minimum legs — AI often ignores the instruction.
+        # If the assembled slip has fewer than DAILY_MIN_LEGS, pad it from
+        # daily_candidates sorted by confidence (highest first).
+        if len(slip_data["selected_legs"]) < self._config.DAILY_MIN_LEGS:
+            logger.warning(
+                f"[GEN] Only {len(slip_data['selected_legs'])} legs assembled "
+                f"(min={self._config.DAILY_MIN_LEGS}) — padding from candidates"
+            )
+            used_tickers = {
+                l.get("kalshi_ticker", "") for l in slip_data["selected_legs"]
+            }
+            remaining = sorted(
+                [c for c in daily_candidates
+                 if c["kalshi_ticker"] not in used_tickers],
+                key=lambda x: x["confidence"],
+                reverse=True,
+            )
+            for c in remaining:
+                if len(slip_data["selected_legs"]) >= self._config.DAILY_MIN_LEGS:
+                    break
+                slip_data["selected_legs"].append({
+                    "game":            c["game"],
+                    "sport":           c["sport"],
+                    "market_type":     c["market_type"],
+                    "pick":            c["pick"],
+                    "calibrated_line": c.get("calibrated_line"),
+                    "original_line":   c.get("original_line"),
+                    "kalshi_ticker":   c["kalshi_ticker"],
+                    "individual_odds": c["individual_odds"],
+                    "confidence":      c["confidence"],
+                    "ai_reasoning":    c.get("ai_reasoning", ""),
+                    "game_start":      c.get("game_start", ""),
+                })
+            # Recalculate combined odds with padded legs
+            padded_combined = 1.0
+            for leg in slip_data["selected_legs"]:
+                lo = float(leg.get("individual_odds") or 0)
+                if lo > 0:
+                    padded_combined *= lo
+            slip_data["combined_odds"] = round(padded_combined, 4)
+            logger.info(
+                f"[GEN] After padding: {len(slip_data['selected_legs'])} legs, "
+                f"combined_odds={slip_data['combined_odds']}"
+            )
 
         # Validate combo
         is_valid, reason = self._intel.validate_combo(
