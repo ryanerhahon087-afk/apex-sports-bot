@@ -14,17 +14,18 @@ import anthropic
 logger = logging.getLogger(__name__)
 
 SERIES_TO_SPORT = {
-    "KXNBAGAME":     "NBA",
-    "KXNBATOTAL":    "NBA",
-    "KXNBATEAMTOTAL":"NBA",
-    "KXNBAPLAYER":   "NBA",
-    "KXMLBGAME":     "MLB",
-    "KXMLBTOTAL":    "MLB",
-    "KXMLBRFI":      "MLB",
-    "KXNHLGAME":     "NHL",
-    "KXNHLTOTAL":    "NHL",
-    "KXNFLGAME":     "NFL",
-    "KXNFLTOTAL":    "NFL",
+    "KXNBAGAME":   "NBA",
+    "KXNBATOTAL":  "NBA",
+    # KXNBATEAMTOTAL excluded — every market is an individual team total
+    # (hallucination risk; Kalshi text doesn't match keyword filters)
+    "KXNBAPLAYER": "NBA",
+    "KXMLBGAME":   "MLB",
+    "KXMLBTOTAL":  "MLB",
+    "KXMLBRFI":    "MLB",
+    "KXNHLGAME":   "NHL",
+    "KXNHLTOTAL":  "NHL",
+    "KXNFLGAME":   "NFL",
+    "KXNFLTOTAL":  "NFL",
 }
 
 ALL_SERIES = list(SERIES_TO_SPORT.keys())
