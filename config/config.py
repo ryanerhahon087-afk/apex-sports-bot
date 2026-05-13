@@ -47,7 +47,7 @@ SPORT_PRIORITY = ["NBA", "NFL", "MLB", "NHL", "NCAAFB", "NCAAMB", "SOCCER", "TEN
 # ── SLIP CONFIGURATION ────────────────────────────────────────────────────────
 
 # Daily Picks Slip
-DAILY_MIN_LEGS          = 2
+DAILY_MIN_LEGS          = 3
 DAILY_MAX_LEGS          = 5
 DAILY_STAKE_PCT         = 0.10       # 10% of cash reserves
 DAILY_HARD_CAP          = 10_000.0   # Max $10,000 per slip
@@ -75,7 +75,7 @@ LOTTO_MIN_ODDS          = 50.0       # Minimum combined odds
 LOTTO_MAX_ODDS          = 455.0      # Maximum combined odds
 LOTTO_MIN_CONFIDENCE    = 5.0        # More permissive — lottery tier
 LOTTO_FREQUENCY_DAYS    = 7          # Generate weekly
-LOTTO_MIN_LEGS          = 5          # Need enough legs for high odds
+LOTTO_MIN_LEGS          = 6          # Need enough legs for high odds
 LOTTO_MAX_LEGS          = 12         # Max legs
 
 # ── ROLLOVER CALCULATOR LIMITS ────────────────────────────────────────────────

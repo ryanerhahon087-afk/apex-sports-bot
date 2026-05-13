@@ -443,11 +443,11 @@ class SyntheticSimulator:
 
             # 4. Daily slip
             daily_result = None
-            if len(candidates) >= 2:
+            if len(candidates) >= 3:
                 daily_result = await self._build_slip(
                     candidates, true_results, balance,
                     slip_type="DAILY", target_odds=2.0,
-                    min_legs=2, max_legs=4, stake_pct=0.10,
+                    min_legs=3, max_legs=5, stake_pct=0.10,
                 )
                 if daily_result:
                     balance = round(balance + daily_result["pnl"], 2)
@@ -464,7 +464,7 @@ class SyntheticSimulator:
                 ro = await self._build_slip(
                     candidates, true_results, rollover_stake,
                     slip_type="ROLLOVER", target_odds=rollover_target,
-                    min_legs=2, max_legs=3, fixed_stake=rollover_stake,
+                    min_legs=2, max_legs=4, fixed_stake=rollover_stake,
                 )
 
                 if ro and ro.get("combined_odds", 0) >= 1.5:
@@ -691,26 +691,41 @@ class SyntheticSimulator:
 
     def _select_legs(
         self,
-        candidates: list,
-        min_legs:   int,
-        max_legs:   int,
+        candidates:  list,
+        min_legs:    int,
+        max_legs:    int,
         target_odds: float,
     ) -> list:
         """
-        Greedily pick up to max_legs candidates (highest confidence first)
-        whose combined odds are at least target_odds.
-        Returns the selected leg list, or [] if min_legs can't be met.
+        Legs-first selection: always build to min_legs using highest-confidence
+        picks first, then keep adding legs as long as combined odds stay within
+        130% of target. Prioritises quantity of safe legs over raw odds.
         """
         sorted_c = sorted(candidates, key=lambda x: x["confidence"], reverse=True)
-        selected = []
-        combined = 1.0
+        selected  = []
+        combined  = 1.0
+
         for c in sorted_c:
             if len(selected) >= max_legs:
                 break
-            selected.append(c)
-            combined *= c["individual_odds"]
-            if len(selected) >= min_legs and combined >= target_odds:
-                break
+
+            leg_odds    = c.get("individual_odds", 1.0)
+            new_combined = combined * leg_odds
+
+            # Always add if we haven't hit the minimum yet
+            if len(selected) < min_legs:
+                selected.append(c)
+                combined = new_combined
+                continue
+
+            # Past minimum: keep adding if odds haven't overshot too far
+            if new_combined <= target_odds * 1.3:
+                selected.append(c)
+                combined = new_combined
+                continue
+
+            # This leg would overshoot — stop
+            break
 
         if len(selected) < min_legs:
             return []

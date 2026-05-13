@@ -91,12 +91,14 @@ Return ONLY the JSON, no other text."""
 
         for attempt in range(4):  # up to 4 attempts with backoff
             try:
-                response = self._client.messages.create(
+                raw = self._client.messages.with_raw_response.create(
                     model=self._model,
                     max_tokens=2000,
                     tools=[{"type": "web_search_20250305", "name": "web_search"}],
                     messages=[{"role": "user", "content": prompt}]
                 )
+                response = raw.parse()
+                await self._check_rate_limit_headers(raw.headers)
 
                 # Extract text from response
                 text = ""
@@ -186,11 +188,13 @@ Return ONLY the JSON."""
 
         for attempt in range(4):
             try:
-                response = self._client.messages.create(
+                raw = self._client.messages.with_raw_response.create(
                     model=self._model,
                     max_tokens=800,
                     messages=[{"role": "user", "content": prompt}]
                 )
+                response = raw.parse()
+                await self._check_rate_limit_headers(raw.headers)
 
                 text = response.content[0].text.strip()
                 if text.startswith("```"):
@@ -222,6 +226,20 @@ Return ONLY the JSON."""
         return {"pick": pick.get("pick"), "confidence": 0,
                 "include_in_slip": False, "reasoning": "rate_limit_retries_exhausted"}
 
+    async def _check_rate_limit_headers(self, headers) -> None:
+        """Log rate limit headers; proactively sleep if tokens are critically low."""
+        tokens_remaining = headers.get("anthropic-ratelimit-tokens-remaining")
+        requests_remaining = headers.get("anthropic-ratelimit-requests-remaining")
+        if tokens_remaining is None:
+            return
+        tokens_remaining = int(tokens_remaining)
+        logger.debug(f"[RATE] tokens_remaining={tokens_remaining} "
+                     f"requests_remaining={requests_remaining}")
+        if tokens_remaining < 5000:
+            logger.warning(f"[RATE] Low tokens remaining ({tokens_remaining}) "
+                           f"— sleeping 10s proactively")
+            await asyncio.sleep(10)
+
     def _calibration_buffer(self, slip_type: str) -> str:
         """Return calibration instructions based on slip type."""
         if slip_type == "DAILY":
@@ -243,35 +261,51 @@ Return ONLY the JSON."""
         prompt = f"""You are assembling a sports betting parlay slip.
 
 SLIP TYPE: {slip_type}
-TARGET COMBINED ODDS: {target_odds}x minimum
+TARGET COMBINED ODDS: {target_odds}x
 MINIMUM LEGS: {min_legs}
 MAXIMUM LEGS: {max_legs}
 
 AVAILABLE CANDIDATES (already researched and evaluated):
 {json.dumps(candidates, indent=2)}
 
-ASSEMBLY RULES:
-1. INVALID COMBINATIONS (never combine these from the SAME game):
-   - Spread + Game winner from the same game
-   - Any two contradictory picks from the same game
+ASSEMBLY PHILOSOPHY:
+We want MANY high-probability legs, not FEW high-odds legs.
+A 4-leg slip where each leg is 82% likely is FAR better than a 2-leg slip
+where each leg is 67% likely — same combined odds but the 4-leg version
+hits far more often because each individual leg is safer.
 
-2. VALID COMBINATIONS:
-   - Game winner + Total from same game (allowed)
-   - Any picks from different games (always allowed)
-   - Different sports can be combined
+TARGET APPROACH:
+1. Sort all candidates by confidence DESCENDING
+2. Always start with the highest confidence pick (conf 8.0+)
+3. Keep adding the next highest confidence pick
+4. PREFER adding a 5th leg at 80% probability over using a 2nd leg at 60%
+5. Only stop adding legs when:
+   - Combined odds exceed the target by more than 30% AND min_legs is met
+   - No more picks with confidence >= 7.0 remain
+   - Maximum legs ({max_legs}) reached
 
-3. SPORT PRIORITY ORDER: NBA first, then MLB, then Soccer
-   Eliminate the least probable/most speculative when choosing
+MINIMUM LEGS: Always reach {min_legs} legs. Never return fewer than {min_legs}
+legs if enough qualifying picks (confidence >= 7.0) exist in the candidates.
+If you have {min_legs}+ qualifying candidates, you MUST use at least {min_legs}.
 
-4. ODDS CALIBRATION:
-   - Each candidate already has its "individual_odds" field pre-calculated — use it as-is
-   - combined_odds = multiply all selected legs' individual_odds together
-   - If combined odds exceed maximum, remove the least confident leg
-   - If combined odds are below minimum, add more legs
-   - IMPORTANT: You must always return combined_odds as the actual product of the legs, never 0
+ODDS TARGETS:
+- DAILY slip: 2.0x–5.0x combined, prefer 3.0x–4.0x
+- ROLLOVER slip: 2.5x–4.0x combined
+- LOTTO slip: {target_odds}x–455x combined (use many legs)
 
-5. FOR LOTTO SLIP: Target {target_odds}x-455x combined odds.
-   More legs, more speculative picks allowed.
+ODDS CALIBRATION:
+- Each candidate's "individual_odds" field is pre-calculated — use it as-is
+- combined_odds = product of all selected legs' individual_odds
+- IMPORTANT: always return combined_odds as the actual product, never 0
+
+INVALID COMBINATIONS (never from the SAME game):
+- Spread + Game winner from the same game
+- Any two contradictory picks from the same game
+
+VALID COMBINATIONS:
+- Game winner + Total from same game (allowed)
+- Any picks from different games (always allowed)
+- Different sports can be combined freely
 
 Select the optimal combination and return in this exact JSON format:
 {{
@@ -300,11 +334,13 @@ Select the optimal combination and return in this exact JSON format:
 Return ONLY the JSON."""
 
         try:
-            response = self._client.messages.create(
+            raw = self._client.messages.with_raw_response.create(
                 model=self._model,
                 max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}]
             )
+            response = raw.parse()
+            await self._check_rate_limit_headers(raw.headers)
 
             text = response.content[0].text.strip()
             if text.startswith("```"):
