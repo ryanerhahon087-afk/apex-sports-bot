@@ -1,7 +1,7 @@
 """
 APEX/SPORTS BOT — Main Entry Point
 Runs the dashboard server and slip generation scheduler.
-Build: 2026-05-12-v9
+Build: 2026-05-12-v10
 """
 import asyncio
 import json
@@ -419,6 +419,52 @@ def get_simulate_results():
     })
 
 
+@app.route("/api/picks/today")
+def todays_picks():
+    """Today's generated slips formatted for manual Kalshi execution."""
+    if not db:
+        return jsonify({"date": datetime.now(timezone.utc).date().isoformat(), "picks": []})
+
+    today = datetime.now(timezone.utc).date().isoformat()
+    slips = db.get_recent_slips(20)
+    today_slips = [s for s in slips if (s.get("created_at") or "")[:10] == today]
+
+    result = []
+    for slip in today_slips:
+        legs = db.get_slip_legs(slip["id"])
+        result.append({
+            "id": slip["id"],
+            "slip_type": slip["slip_type"],
+            "sport_mix": slip["sport_mix"],
+            "combined_odds": slip["combined_odds"],
+            "confidence": slip["confidence"],
+            "stake_suggestion": slip["stake"],
+            "potential_payout": slip["potential_payout"],
+            "status": slip["status"],
+            "created_at": slip["created_at"],
+            "legs": [{
+                "sport": leg["sport"],
+                "game": leg["game"],
+                "pick": leg["pick"],
+                "original_line": leg["original_line"],
+                "calibrated_line": leg["calibrated_line"],
+                "confidence": leg["confidence"],
+                "odds": leg["individual_odds"],
+                "reasoning": leg["ai_reasoning"],
+                "kalshi_ticker": leg["kalshi_ticker"],
+                "kalshi_search": (leg["game"].split(" at ")[-1]
+                                  if " at " in (leg["game"] or "")
+                                  else leg["game"] or ""),
+            } for leg in legs],
+        })
+
+    return jsonify({
+        "date": today,
+        "picks": result,
+        "total_slips": len(result),
+    })
+
+
 @app.route("/api/pause", methods=["POST"])
 def toggle_pause():
     global bot_paused
@@ -694,6 +740,56 @@ body::before { content:''; position:fixed; inset:0; background:radial-gradient(e
 .bt-run-row { display:flex; align-items:center; gap:12px; }
 .bt-days-select { background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:8px 12px; color:var(--text); font-family:'DM Sans'; font-size:13px; }
 
+/* TODAY'S PICKS CARD */
+.picks-card { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:24px; }
+.picks-empty { text-align:center; padding:40px 24px; color:var(--muted); font-size:14px; line-height:1.8; }
+.picks-empty strong { display:block; font-size:16px; color:var(--text); margin-bottom:8px; }
+.ticket { background:var(--bg2); border:1px solid var(--border); border-radius:12px; overflow:hidden; margin-bottom:16px; position:relative; }
+.ticket::before { content:''; position:absolute; top:0; left:0; right:0; height:3px; }
+.ticket-daily::before { background:linear-gradient(90deg,var(--green),rgba(0,232,122,0)); }
+.ticket-rollover::before { background:linear-gradient(90deg,var(--purple),rgba(168,85,247,0)); }
+.ticket-lotto::before { background:linear-gradient(90deg,var(--gold),rgba(255,200,32,0)); }
+.ticket-hdr { display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid var(--border); }
+.ticket-type { display:flex; align-items:center; gap:10px; }
+.ticket-badge { padding:5px 14px; border-radius:20px; font-family:'Space Mono'; font-size:12px; font-weight:700; letter-spacing:1px; }
+.tb-daily { background:rgba(0,232,122,0.12); color:var(--green); border:1px solid rgba(0,232,122,0.25); }
+.tb-rollover { background:rgba(168,85,247,0.12); color:var(--purple); border:1px solid rgba(168,85,247,0.25); }
+.tb-lotto { background:rgba(255,200,32,0.12); color:var(--gold); border:1px solid rgba(255,200,32,0.25); }
+.ticket-status { font-size:11px; color:var(--muted); font-family:'Space Mono'; }
+.ts-pending { color:var(--gold); }
+.ts-won { color:var(--green); }
+.ts-lost { color:var(--red); }
+.ticket-legs { padding:0 18px; }
+.pick-row { padding:16px 0; border-bottom:1px solid rgba(26,40,64,0.5); display:flex; gap:14px; align-items:flex-start; }
+.pick-row:last-child { border-bottom:none; }
+.pick-sport-icon { font-size:22px; flex-shrink:0; margin-top:2px; }
+.pick-body { flex:1; min-width:0; }
+.pick-game { font-size:15px; font-weight:700; color:var(--text); margin-bottom:5px; }
+.pick-line { font-size:17px; font-family:'Space Mono'; color:var(--green); font-weight:700; margin-bottom:6px; }
+.pick-reasoning { font-size:13px; color:var(--muted); line-height:1.55; margin-bottom:8px; }
+.pick-meta { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.pick-conf { font-size:12px; font-family:'Space Mono'; padding:3px 10px; border-radius:6px; font-weight:700; }
+.pc-high { background:rgba(0,232,122,0.1); color:var(--green); }
+.pc-mid  { background:rgba(255,200,32,0.1); color:var(--gold); }
+.pc-low  { background:rgba(255,51,85,0.1); color:var(--red); }
+.pick-odds-badge { font-size:12px; font-family:'Space Mono'; color:var(--blue); background:rgba(45,156,255,0.1); padding:3px 10px; border-radius:6px; }
+.kalshi-btn { padding:4px 14px; background:rgba(45,156,255,0.08); border:1px solid rgba(45,156,255,0.25); color:var(--blue); border-radius:6px; font-size:12px; cursor:pointer; font-family:'DM Sans'; font-weight:600; text-decoration:none; display:inline-flex; align-items:center; gap:5px; transition:all 0.2s; white-space:nowrap; }
+.kalshi-btn:hover { background:rgba(45,156,255,0.18); border-color:var(--blue); }
+.ticket-footer { background:rgba(0,0,0,0.2); padding:14px 18px; display:flex; align-items:center; justify-content:space-between; }
+.ticket-combined { display:flex; align-items:baseline; gap:6px; }
+.tc-odds { font-family:'Space Mono'; font-size:22px; font-weight:700; color:var(--green); }
+.tc-label { font-size:12px; color:var(--muted); }
+.ticket-stake-box { text-align:right; }
+.tsb-label { font-size:11px; color:var(--muted); margin-bottom:2px; }
+.tsb-value { font-family:'Space Mono'; font-size:16px; color:var(--gold); font-weight:700; }
+.tsb-payout { font-size:11px; color:var(--muted); margin-top:2px; }
+.picks-date-hdr { display:flex; align-items:center; justify-content:space-between; margin-bottom:20px; }
+.picks-date-label { font-family:'Space Mono'; font-size:13px; color:var(--muted); }
+.picks-refresh-btn { padding:6px 16px; background:transparent; border:1px solid var(--border); border-radius:7px; color:var(--muted); cursor:pointer; font-size:12px; font-family:'DM Sans'; transition:all 0.2s; }
+.picks-refresh-btn:hover { border-color:var(--blue); color:var(--blue); }
+.picks-gen-btn { padding:8px 20px; background:rgba(0,232,122,0.1); border:1px solid rgba(0,232,122,0.3); border-radius:8px; color:var(--green); cursor:pointer; font-size:13px; font-family:'DM Sans'; font-weight:700; transition:all 0.2s; }
+.picks-gen-btn:hover { background:rgba(0,232,122,0.2); }
+
 /* SCROLLBAR */
 ::-webkit-scrollbar { width:5px; }
 ::-webkit-scrollbar-track { background:var(--bg); }
@@ -738,6 +834,29 @@ body::before { content:''; position:fixed; inset:0; background:radial-gradient(e
 
 <!-- MAIN -->
 <div class="main">
+
+  <!-- TODAY'S PICKS -->
+  <div class="picks-card" id="picks-card">
+    <div class="card-hdr" style="margin-bottom:0">
+      <div class="card-title" style="font-size:13px;letter-spacing:1.5px">
+        <span class="card-dot" style="background:var(--green)"></span>
+        TODAY'S PICKS
+        <span id="picks-count-badge" style="display:none;margin-left:8px;background:rgba(0,232,122,0.15);color:var(--green);border:1px solid rgba(0,232,122,0.3);padding:2px 10px;border-radius:10px;font-size:11px;font-family:'Space Mono'"></span>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span id="picks-date" class="picks-date-label"></span>
+        <button class="picks-refresh-btn" onclick="fetchTodaysPicks()">↻ Refresh</button>
+        <button class="picks-gen-btn" onclick="generateNow()">⚡ Generate Picks</button>
+      </div>
+    </div>
+    <div id="picks-content" style="margin-top:20px">
+      <div class="picks-empty">
+        <strong>No picks generated yet today</strong>
+        Click "Generate Picks" to create today's slip recommendations,<br>
+        or wait for the scheduled 10AM–12PM ET generation window.
+      </div>
+    </div>
+  </div>
 
   <!-- STAT CARDS -->
   <div class="stats-row">
@@ -1852,6 +1971,105 @@ async function fetchSimulationResults() {
   } catch(e) {}
 }
 
+// ── TODAY'S PICKS ─────────────────────────────────────────────────────────────
+async function fetchTodaysPicks() {
+  try {
+    const r = await fetch('/api/picks/today');
+    const d = await r.json();
+    renderTodaysPicks(d);
+  } catch(e) { console.error('Picks fetch error:', e); }
+}
+
+function renderTodaysPicks(data) {
+  const picks = data.picks || [];
+  const date  = data.date  || '';
+
+  const dateEl = document.getElementById('picks-date');
+  const badge  = document.getElementById('picks-count-badge');
+  if (dateEl) dateEl.textContent = date;
+
+  const content = document.getElementById('picks-content');
+  if (!content) return;
+
+  if (!picks.length) {
+    badge.style.display = 'none';
+    content.innerHTML = `<div class="picks-empty">
+      <strong>No picks generated yet today</strong>
+      Click "Generate Picks" to create today's slip recommendations,<br>
+      or wait for the scheduled 10AM–12PM ET generation window.
+    </div>`;
+    return;
+  }
+
+  badge.textContent  = picks.length + (picks.length === 1 ? ' slip' : ' slips');
+  badge.style.display = 'inline';
+
+  const sportIcon = s => ({NBA:'🏀',NFL:'🏈',MLB:'⚾',NHL:'🏒',TENNIS:'🎾',SOCCER:'⚽',NCAAFB:'🏈',NCAAMB:'🏀'})[s] || '🎯';
+  const confClass  = c => c >= 8 ? 'pc-high' : c >= 6 ? 'pc-mid' : 'pc-low';
+  const typeCls    = t => ({'DAILY':'daily','ROLLOVER':'rollover','LOTTO':'lotto'}[t] || 'daily');
+  const statusSpan = s => {
+    const cls = s === 'WON' ? 'ts-won' : s === 'LOST' ? 'ts-lost' : 'ts-pending';
+    const lbl = s === 'PENDING' ? 'OPEN' : s;
+    return `<span class="ticket-status ${cls}">${lbl}</span>`;
+  };
+  const kalshiUrl = leg => {
+    const search = leg.kalshi_ticker || leg.kalshi_search || leg.game || '';
+    return `https://kalshi.com/markets?search=${encodeURIComponent(search)}`;
+  };
+
+  content.innerHTML = picks.map(slip => {
+    const tc = typeCls(slip.slip_type);
+    const legsHtml = (slip.legs || []).map(leg => {
+      const conf = Number(leg.confidence) || 0;
+      const odds = Number(leg.odds) || 0;
+      const reasoning = leg.reasoning ? `<div class="pick-reasoning">💡 ${leg.reasoning}</div>` : '';
+      const lineDiff = leg.original_line && leg.calibrated_line && leg.original_line !== leg.calibrated_line
+        ? `<span style="font-size:11px;color:var(--muted);text-decoration:line-through;margin-left:8px">${leg.original_line}</span>` : '';
+      return `<div class="pick-row">
+        <div class="pick-sport-icon">${sportIcon(leg.sport)}</div>
+        <div class="pick-body">
+          <div class="pick-game">${leg.game || '—'}</div>
+          <div class="pick-line">${leg.pick || '—'}${lineDiff}</div>
+          ${reasoning}
+          <div class="pick-meta">
+            <span class="pick-conf ${confClass(conf)}">Conf ${conf.toFixed(1)}/10</span>
+            <span class="pick-odds-badge">${odds.toFixed(2)}x</span>
+            <a class="kalshi-btn" href="${kalshiUrl(leg)}" target="_blank" rel="noopener">
+              Search Kalshi →
+            </a>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+
+    const combinedOdds  = Number(slip.combined_odds) || 0;
+    const stake         = Number(slip.stake_suggestion) || 0;
+    const payout        = Number(slip.potential_payout) || 0;
+
+    return `<div class="ticket ticket-${tc}">
+      <div class="ticket-hdr">
+        <div class="ticket-type">
+          <span class="ticket-badge tb-${tc}">${slip.slip_type}</span>
+          <span style="font-size:13px;color:var(--muted)">${(slip.sport_mix||'').replace(/,/g,' · ')}</span>
+        </div>
+        ${statusSpan(slip.status)}
+      </div>
+      <div class="ticket-legs">${legsHtml}</div>
+      <div class="ticket-footer">
+        <div class="ticket-combined">
+          <span class="tc-odds">${combinedOdds.toFixed(2)}x</span>
+          <span class="tc-label">combined odds</span>
+        </div>
+        <div class="ticket-stake-box">
+          <div class="tsb-label">Suggested stake</div>
+          <div class="tsb-value">$${stake.toFixed(2)}</div>
+          <div class="tsb-payout">→ $${payout.toFixed(2)} if all legs win</div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
 // ── HELPERS ───────────────────────────────────────────────────────────────────
 function formatTime(isoStr) {
   if (!isoStr) return '—';
@@ -1878,6 +2096,7 @@ function formatFinish(isoStr) {
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
 function init() {
+  fetchTodaysPicks();
   fetchStatus();
   fetchSlips();
   fetchRollover();
@@ -1891,6 +2110,7 @@ function init() {
   setInterval(fetchSlips, 30000);
   setInterval(fetchRollover, 30000);
   setInterval(fetchStats, 60000);
+  setInterval(fetchTodaysPicks, 60000);
 }
 
 window.addEventListener('load', init);
