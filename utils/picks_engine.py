@@ -132,13 +132,20 @@ class PicksEngine:
         return all_markets
 
     def _get_eligible_markets(self, markets: list, target_odds: float) -> list:
-        """Filter markets to the odds range appropriate for this slip's target."""
+        """Filter markets to the odds range appropriate for this slip's target.
+
+        yes_ask ceiling = 0.87 → min 1.15x per leg (prevents near-certain garbage)
+        yes_ask floor varies by tier → caps max per-leg odds to prevent overshoot.
+        """
         if target_odds <= 2.0:
-            min_ask, max_ask = 0.55, 0.87   # 1.15x – 1.82x per leg
+            # per-leg target ~1.15x-1.35x → allow yes_ask 0.74-0.87
+            min_ask, max_ask = 0.74, 0.87
         elif target_odds <= 3.0:
-            min_ask, max_ask = 0.45, 0.87   # 1.15x – 2.22x per leg
+            # per-leg target ~1.20x-1.50x → allow yes_ask 0.67-0.87
+            min_ask, max_ask = 0.67, 0.87
         else:
-            min_ask, max_ask = 0.35, 0.87   # 1.15x – 2.86x per leg
+            # per-leg target ~1.20x-2.50x → allow yes_ask 0.40-0.87
+            min_ask, max_ask = 0.40, 0.87
 
         return [m for m in markets if min_ask <= m["yes_ask"] <= max_ask]
 
@@ -171,38 +178,58 @@ class PicksEngine:
         if target_odds <= 2.0:
             min_legs, max_legs = 4, 6
             legs_desc = "4-6 legs"
-            odds_range_desc = "1.15x-1.82x per leg"
-            bold_instruction = ""
+            odds_range_desc = "1.15x-1.30x per leg"
+            per_leg_max = 1.35
+            combined_min, combined_max = 1.8, 2.5
+            math_example = (
+                "5 legs at 1.18x each = 1.18^5 = 2.29x ✓\n"
+                "4 legs at 1.22x each = 1.22^4 = 2.22x ✓\n"
+                "4 legs at 1.50x each = 1.50^4 = 5.06x ✗ (too high — stay under 1.35x per leg)"
+            )
         elif target_odds <= 3.0:
             min_legs, max_legs = 4, 6
             legs_desc = "4-6 legs"
-            odds_range_desc = "1.15x-2.22x per leg"
-            bold_instruction = ""
+            odds_range_desc = "1.20x-1.45x per leg"
+            per_leg_max = 1.50
+            combined_min, combined_max = 2.5, 3.5
+            math_example = (
+                "5 legs at 1.25x each = 1.25^5 = 3.05x ✓\n"
+                "4 legs at 1.32x each = 1.32^4 = 3.03x ✓\n"
+                "5 legs at 1.60x each = 1.60^5 = 10.49x ✗ (too high — stay under 1.50x per leg)"
+            )
         else:
             min_legs, max_legs = 6, 8
             legs_desc = "6-8 legs"
-            odds_range_desc = "1.15x-2.86x per leg"
-            bold_instruction = """
-YOU MUST reach at least 4.5x combined odds minimum.
-Use 6-8 legs. Include some picks at 1.5x-2.5x odds alongside the safer 1.15x-1.25x picks.
-A mix of safer and slightly bolder picks is better than all low-odds picks that can't reach the target.
-Example that works: 4 legs at 1.20x + 2 legs at 1.60x = 1.20^4 × 1.60^2 = 5.31x ✓
-Example that fails: 7 legs at 1.20x = 3.58x ✗"""
+            odds_range_desc = "1.20x-2.00x per leg, mixing safer and bolder picks"
+            per_leg_max = 2.5
+            combined_min, combined_max = 4.5, 6.0
+            math_example = (
+                "6 legs at 1.31x each = 1.31^6 = 5.0x ✓\n"
+                "4 legs at 1.20x + 2 legs at 1.70x = 2.07 × 2.89 = 5.99x ✓\n"
+                "7 legs at 1.20x each = 1.20^7 = 3.58x ✗ (too low — add some 1.4x-2.0x legs)\n"
+                "5 legs at 1.60x each = 1.60^5 = 10.49x ✗ (too high)"
+            )
 
         stake = round(min(balance * 0.10, 10_000.0), 2)
 
         prompt = f"""You are a sharp sports analyst building a Kalshi prediction market parlay slip.
 
 TODAY: {datetime.now(timezone.utc).strftime('%A %B %d, %Y')}
-TARGET: {slip_name} slip — combined odds as close to {target_odds}x as possible
-{bold_instruction}
-AVAILABLE KALSHI MARKETS (filtered to {odds_range_desc}):
+TARGET: {slip_name} slip
+
+COMBINED ODDS TARGET: {combined_min}x to {combined_max}x (aim for {target_odds}x)
+PER-LEG ODDS: {odds_range_desc} — DO NOT exceed {per_leg_max}x on any single leg
+
+MATH CHECK — make sure your picks multiply to the target:
+{math_example}
+
+AVAILABLE KALSHI MARKETS:
 {markets_text}
 
 YOUR STRATEGY:
-Build this slip using {legs_desc} ({odds_range_desc}).
-Each individual leg should be highly likely to win (65-85% probability).
-Together they must multiply to AT LEAST {target_odds * 0.90:.1f}x combined odds (target {target_odds}x).
+Use {legs_desc}. Each leg: highly likely to win (65-85% probability).
+The combined product of all leg odds MUST land between {combined_min}x and {combined_max}x.
+Before finalising, multiply out your leg odds and verify you are in range.
 
 IMPORTANT: Only Kalshi market types that actually exist:
 1. GAME_WINNER - Will [team] win? YES/NO
@@ -211,7 +238,7 @@ IMPORTANT: Only Kalshi market types that actually exist:
 
 DO NOT pick individual team scoring totals.
 DO NOT pick markets with odds below 1.15x (too certain, bad value).
-DO NOT pick markets with odds above 2.9x per single leg (too risky).
+DO NOT pick any single leg above {per_leg_max}x odds.
 
 PICK SELECTION RULES:
 1. Use {min_legs}-{max_legs} legs — NEVER fewer than {min_legs}
