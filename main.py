@@ -166,18 +166,24 @@ def generate_picks():
 
     try:
         from utils.picks_engine import PicksEngine
-        engine  = PicksEngine(ANTHROPIC_API_KEY, kalshi)
         balance = db.get_balance() if db else STARTING_BALANCE
 
         async def _run():
-            # Always create a fresh aiohttp session in this event loop.
-            # Reusing a session from a different loop causes "Timeout context
-            # manager should be used inside a task".
-            if kalshi._session:
-                await kalshi._session.close()
-                kalshi._session = None
-            await kalshi.connect()
-            return await engine.generate_all_slips(balance)
+            # Create a brand-new Kalshi client in this event loop so the
+            # aiohttp session is never shared across loops ("Timeout context
+            # manager should be used inside a task" otherwise).
+            fresh_kalshi = SportsKalshiClient(
+                api_key_id=KALSHI_API_KEY_ID,
+                private_key_pem=KALSHI_PRIVATE_KEY,
+                base_url=KALSHI_BASE_URL,
+                paper_mode=PAPER_MODE,
+            )
+            await fresh_kalshi.connect()
+            try:
+                engine = PicksEngine(ANTHROPIC_API_KEY, fresh_kalshi)
+                return await engine.generate_all_slips(balance)
+            finally:
+                await fresh_kalshi.disconnect()
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
