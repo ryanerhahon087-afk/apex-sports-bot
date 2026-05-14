@@ -181,6 +181,7 @@ class PicksEngine:
             odds_range_desc = "1.15x-1.30x per leg"
             per_leg_max = 1.35
             combined_min, combined_max = 1.8, 2.5
+            bold_hard_limit = ""
             math_example = (
                 "5 legs at 1.18x each = 1.18^5 = 2.29x ✓\n"
                 "4 legs at 1.22x each = 1.22^4 = 2.22x ✓\n"
@@ -192,6 +193,7 @@ class PicksEngine:
             odds_range_desc = "1.20x-1.45x per leg"
             per_leg_max = 1.50
             combined_min, combined_max = 2.5, 3.5
+            bold_hard_limit = ""
             math_example = (
                 "5 legs at 1.25x each = 1.25^5 = 3.05x ✓\n"
                 "4 legs at 1.32x each = 1.32^4 = 3.03x ✓\n"
@@ -202,12 +204,18 @@ class PicksEngine:
             legs_desc = "6-8 legs"
             odds_range_desc = "1.20x-2.00x per leg, mixing safer and bolder picks"
             per_leg_max = 2.5
-            combined_min, combined_max = 4.5, 6.0
+            combined_min, combined_max = 4.0, 6.5
+            bold_hard_limit = """
+
+HARD LIMIT: Combined odds MUST be between 4.0x and 6.5x maximum.
+Do NOT include more than 2 game winner picks — they compound too fast.
+Balance game winners with TOTAL picks (aim for 2 game winners + 4 totals).
+If your picks multiply above 6.5x, remove the lowest confidence leg."""
             math_example = (
                 "6 legs at 1.31x each = 1.31^6 = 5.0x ✓\n"
-                "4 legs at 1.20x + 2 legs at 1.70x = 2.07 × 2.89 = 5.99x ✓\n"
+                "4 legs at 1.20x + 2 legs at 1.70x = 2.07 x 2.89 = 5.99x ✓\n"
                 "7 legs at 1.20x each = 1.20^7 = 3.58x ✗ (too low — add some 1.4x-2.0x legs)\n"
-                "5 legs at 1.60x each = 1.60^5 = 10.49x ✗ (too high)"
+                "5 legs at 1.60x each = 1.60^5 = 10.49x ✗ (too high — cut to max 2 game winners)"
             )
 
         stake = round(min(balance * 0.10, 10_000.0), 2)
@@ -240,10 +248,13 @@ DO NOT pick individual team scoring totals.
 DO NOT pick markets with odds below 1.15x (too certain, bad value).
 DO NOT pick any single leg above {per_leg_max}x odds.
 
+DIVERSITY RULE: Maximum 3 MLB total picks per slip.
+Maximum 2 picks from the same sport. Include at least 2 different sports per slip.{bold_hard_limit}
+
 PICK SELECTION RULES:
 1. Use {min_legs}-{max_legs} legs — NEVER fewer than {min_legs}
-2. Mix sports when possible (NBA + MLB + NHL adds diversity)
-3. Mix market types when possible (totals + game winners + player props)
+2. Mix sports — include NBA, MLB, NHL, NFL picks where available
+3. Mix market types (totals + game winners)
 4. For TOTAL markets: pick OVER on LOW lines (safer), not UNDER on high lines
 5. For GAME_WINNER: only pick clear favorites (odds 1.2x-2.0x)
 6. For PLAYER_PROP: pick player props with very low bars (1+ threes, 10+ points)
@@ -326,6 +337,23 @@ Respond ONLY with valid JSON, no other text:
                 raise ValueError("Not enough valid tickers after validation")
 
             combined = round(combined, 4)
+
+            # Hard cap: trim highest-odds legs until combined is within range
+            if combined > target_odds * 1.4:
+                valid_legs.sort(key=lambda x: x["odds"])  # lowest first → pop removes highest
+                while len(valid_legs) > 3 and combined > target_odds * 1.4:
+                    removed = valid_legs.pop()
+                    combined = round(
+                        1.0 if not valid_legs else
+                        __import__("functools").reduce(lambda a, b: a * b,
+                                                       [l["odds"] for l in valid_legs]),
+                        4,
+                    )
+                    logger.info(
+                        f"[PICKS] Trimmed leg to reduce odds: "
+                        f"removed {removed['pick']!r}, now {combined:.4f}x"
+                    )
+
             logger.info(
                 f"[PICKS] {slip_name}: {len(valid_legs)} legs, "
                 f"{combined}x odds, conf={slip_data.get('overall_confidence')}"
