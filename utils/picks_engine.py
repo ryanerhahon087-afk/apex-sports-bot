@@ -339,9 +339,9 @@ Respond ONLY with valid JSON, no other text:
             combined = round(combined, 4)
 
             # Hard cap: trim highest-odds legs until combined is within range
-            if combined > target_odds * 1.4:
+            if combined > combined_max:
                 valid_legs.sort(key=lambda x: x["odds"])  # lowest first → pop removes highest
-                while len(valid_legs) > 3 and combined > target_odds * 1.4:
+                while len(valid_legs) > 3 and combined > combined_max:
                     removed = valid_legs.pop()
                     combined = round(
                         1.0 if not valid_legs else
